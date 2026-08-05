@@ -91,13 +91,29 @@ def console_resize_guest() -> bool:
     return QSettings(*_SETTINGS).value("console_resize_guest", "false") in ("true", True)
 
 
+def save_console_resize_guest(on: bool) -> None:
+    QSettings(*_SETTINGS).setValue("console_resize_guest", "true" if on else "false")
+
+
 def console_autoconnect() -> bool:
     return QSettings(*_SETTINGS).value("console_autoconnect", "true") in ("true", True)
 
 
 def console_release_keys() -> str:
-    """Key combination that frees a captured pointer."""
+    """Key combination that gives the pointer and keyboard back."""
     return QSettings(*_SETTINGS).value("console_release_keys", "Ctrl+Alt")
+
+
+def console_grab_keyboard() -> bool:
+    """Whether clicking the console hands the whole keyboard to the guest.
+
+    On means Alt+Tab, Super and this app's own shortcuts go to the guest while
+    you are working in it, which is what makes a console usable for anything
+    that uses those keys. The release combination always comes back here.
+    """
+    return QSettings(*_SETTINGS).value("console_grab_keyboard", "true") in (
+        "true", True
+    )
 
 
 def os_icons_enabled() -> bool:
@@ -127,6 +143,20 @@ def default_graphics() -> str:
 
 def default_cpu_model() -> str:
     return QSettings(*_SETTINGS).value("default_cpu_model", "host-passthrough")
+
+
+def virtio_win_iso() -> str:
+    """Where this host keeps the virtio-win driver disc, if it has been said.
+
+    One disc serves every Windows guest, and it is a 700 MB download otherwise,
+    so the path picked once is offered again for the next machine. Empty means
+    nothing has been remembered and the dialog starts from what it can find.
+    """
+    return str(QSettings(*_SETTINGS).value("virtio_win_iso", "") or "")
+
+
+def save_virtio_win_iso(path: str) -> None:
+    QSettings(*_SETTINGS).setValue("virtio_win_iso", path.strip())
 
 
 def active_uri() -> str:
@@ -287,7 +317,7 @@ class SettingsPage(QWidget):
         )
         scale_row.addWidget(scale_label)
         scale_row.addWidget(self.scaling)
-        release_label = QLabel("Release pointer with")
+        release_label = QLabel("Release input with")
         release_label.setProperty("class", "StatVal")
         self.release_keys = QComboBox()
         self.release_keys.addItems(["Ctrl+Alt", "Ctrl+Shift", "Alt+Shift", "Super"])
@@ -300,8 +330,23 @@ class SettingsPage(QWidget):
         scale_row.addWidget(self.release_keys)
         scale_row.addStretch(1)
         content.addLayout(scale_row)
+        self.grab_keyboard = QCheckBox(
+            "Send every key to the guest while you are working in the console"
+        )
+        self.grab_keyboard.setToolTip(
+            "Clicking the display takes the keyboard: Alt+Tab, Super and this "
+            "app's own shortcuts go to the guest until you press the release "
+            "combination."
+        )
+        self.grab_keyboard.setChecked(console_grab_keyboard())
+        self.grab_keyboard.toggled.connect(
+            lambda on: self._settings.setValue(
+                "console_grab_keyboard", "true" if on else "false")
+        )
+        content.addWidget(self.grab_keyboard)
         self.resize_guest = QCheckBox(
-            "Resize the guest's resolution to match the window (needs the guest agent)"
+            "Resize the guest's resolution to match the window (needs a "
+            "retargetable display: virtio or QXL, with the guest's driver)"
         )
         self.resize_guest.setChecked(console_resize_guest())
         self.resize_guest.toggled.connect(
@@ -435,6 +480,32 @@ class SettingsPage(QWidget):
         content.addLayout(row)
         content.addSpacing(12)
 
+        virtio_title = QLabel("virtio-win driver disc")
+        virtio_title.setProperty("class", "SectionTitle")
+        content.addWidget(virtio_title)
+        virtio_hint = QLabel(
+            "The disc Windows guests install their virtio drivers from. Set "
+            "here, or by ticking 'remember this disc' when a machine attaches "
+            "one; every machine after that is offered the same copy. Clear it "
+            "to be asked again."
+        )
+        virtio_hint.setObjectName("ConsoleHint")
+        virtio_hint.setWordWrap(True)
+        content.addWidget(virtio_hint)
+        virtio_row = QHBoxLayout()
+        self.virtio_iso = QLineEdit(virtio_win_iso())
+        self.virtio_iso.setPlaceholderText("/usr/share/virtio-win/virtio-win.iso")
+        self.virtio_iso.editingFinished.connect(
+            lambda: save_virtio_win_iso(self.virtio_iso.text())
+        )
+        virtio_browse = QPushButton("Browse…")
+        virtio_browse.setProperty("class", "GhostButton")
+        virtio_browse.clicked.connect(self._pick_virtio_iso)
+        virtio_row.addWidget(self.virtio_iso, 1)
+        virtio_row.addWidget(virtio_browse)
+        content.addLayout(virtio_row)
+        content.addSpacing(12)
+
         about_title = QLabel("About")
         about_title.setProperty("class", "SectionTitle")
         content.addWidget(about_title)
@@ -546,3 +617,17 @@ class SettingsPage(QWidget):
         if path:
             self.iso_dir.setText(path)
             self._settings.setValue("iso_dir", path)
+
+    def _pick_virtio_iso(self) -> None:
+        from ..data.catalog import virtio_win_candidates
+
+        start = self.virtio_iso.text().strip() or next(
+            iter(virtio_win_candidates()), self.iso_dir.text()
+        )
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Choose the virtio-win disc", start,
+            "Disc images (*.iso);;All files (*)",
+        )
+        if path:
+            self.virtio_iso.setText(path)
+            save_virtio_win_iso(path)

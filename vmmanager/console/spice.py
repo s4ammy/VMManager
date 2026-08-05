@@ -14,6 +14,7 @@ from PySide6.QtGui import QImage, QPainter
 from PySide6.QtWidgets import QApplication, QWidget
 
 from .. import theme
+from .grab import InputGrab, grab_on_click, release_combo
 
 try:
     import gi
@@ -81,6 +82,7 @@ class SpiceClient(QWidget):
     state_changed = Signal(str)  # "connecting" | "connected" | "closed" | error text
     mouse_mode_changed = Signal(int)  # MOUSE_SERVER | MOUSE_CLIENT
     capture_changed = Signal(bool)  # pointer captured for relative mode
+    grab_changed = Signal(bool)  # keyboard handed to the guest
 
     MOUSE_SERVER, MOUSE_CLIENT = 1, 2
 
@@ -104,6 +106,8 @@ class SpiceClient(QWidget):
         self._warping = False  # ignore the move event our own warp generates
         self._motion_remainder = [0.0, 0.0]  # sub-pixel delta carry
         self._held: dict[int, int] = {}  # qt key -> scancode currently down
+        self.grab = InputGrab(self)
+        self.grab.changed.connect(self.grab_changed)
         self._pump = QTimer(self)
         self._pump.setInterval(10)
         self._pump.timeout.connect(self._iterate)
@@ -136,7 +140,7 @@ class SpiceClient(QWidget):
         self._pump.start()
 
     def close_connection(self) -> None:
-        self.release_pointer()
+        self.release_all()
         self._pump.stop()
         if self._session is not None:
             try:
@@ -420,7 +424,7 @@ class SpiceClient(QWidget):
         self._captured = True
         self.setCursor(Qt.CursorShape.BlankCursor)
         self.grabMouse()
-        self.grabKeyboard()
+        self.take_input()  # a captured pointer without the keyboard is half a grab
         self._warp_to_centre()
         self.capture_changed.emit(True)
 
@@ -429,11 +433,31 @@ class SpiceClient(QWidget):
             return
         self._captured = False
         self.releaseMouse()
-        self.releaseKeyboard()
         self.unsetCursor()
         self._motion_remainder = [0.0, 0.0]
-        self._release_held_keys()
         self.capture_changed.emit(False)
+
+    # -- input grab
+    #
+    # The pointer and the keyboard are grabbed separately: a guest with a tablet
+    # gives the pointer a shared coordinate space and needs no mouse grab at
+    # all, but its keyboard still has Alt+Tab and Super taken out of it before
+    # it arrives. Both are given back by the same combination.
+
+    def take_input(self) -> None:
+        """Everything the keyboard does goes to the guest from here."""
+        if self._active:
+            self.grab.take()
+
+    def release_input(self) -> None:
+        if not self.grab.held:
+            return
+        self._release_held_keys()
+        self.grab.release()
+
+    def release_all(self) -> None:
+        self.release_pointer()
+        self.release_input()
 
     @property
     def captured(self) -> bool:
@@ -493,6 +517,10 @@ class SpiceClient(QWidget):
         if self._mouse_mode == self.MOUSE_SERVER and not self._captured:
             self._capture_pointer()  # first click grabs; no click sent through
             return
+        # Absolute pointer: no mouse grab needed, but clicking in is still the
+        # moment the keyboard should start belonging to the guest.
+        if grab_on_click():
+            self.take_input()
         self._buttons_state |= self._BUTTON_MASK.get(event.button(), 0)
         self._send_position(event.position())
         if self._inputs is not None and event.button() in self._BUTTON_NUM:
@@ -517,8 +545,12 @@ class SpiceClient(QWidget):
         super().leaveEvent(event)
 
     def focusOutEvent(self, event) -> None:
-        self.release_pointer()
+        self.release_all()
         super().focusOutEvent(event)
+
+    def hideEvent(self, event) -> None:  # noqa: N802 - Qt's name
+        self.release_all()
+        super().hideEvent(event)
 
     # -- guest resolution
     #
@@ -581,31 +613,13 @@ class SpiceClient(QWidget):
                 return evdev
         return _QTKEY_TO_XT.get(event.key(), 0)
 
-    # A key combination frees a captured pointer. We track held keys ourselves
-    # instead of reading event.modifiers(): the modifier bits for the key
-    # currently being pressed are not reported consistently across platforms.
-    _COMBO_KEYS = {
-        "Ctrl+Alt": frozenset({Qt.Key.Key_Control, Qt.Key.Key_Alt}),
-        "Ctrl+Shift": frozenset({Qt.Key.Key_Control, Qt.Key.Key_Shift}),
-        "Alt+Shift": frozenset({Qt.Key.Key_Alt, Qt.Key.Key_Shift}),
-        "Super": frozenset({Qt.Key.Key_Meta}),
-    }
-
-    @property
-    def _RELEASE_COMBO(self) -> frozenset:  # noqa: N802 - kept for readability
-        try:
-            from ..pages.settings import console_release_keys
-
-            choice = console_release_keys()
-        except Exception:  # noqa: BLE001 - preferences are optional
-            choice = "Ctrl+Alt"
-        return self._COMBO_KEYS.get(choice, self._COMBO_KEYS["Ctrl+Alt"])
-
     def keyPressEvent(self, event) -> None:
         code = self._scancode(event)
         self._held[event.key()] = code
-        if self._captured and self._RELEASE_COMBO <= set(self._held):
-            self.release_pointer()
+        # The one combination the guest never sees: it is how you get your
+        # pointer and your desktop's own shortcuts back.
+        if (self._captured or self.grab.held) and release_combo() <= set(self._held):
+            self.release_all()
             return
         if code and self._inputs is not None:
             self._inputs.key_press(code)

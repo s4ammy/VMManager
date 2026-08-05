@@ -241,6 +241,111 @@ def test_modes_reach_a_popped_out_window(main, machines, qapp):
     assert main._windows[uuid].page._mode_btn.isVisible()
 
 
+# -- what a window opens belongs to that window
+#
+# A menu or a dialog is placed relative to the window it belongs to, and under
+# Wayland that is the only thing deciding where it lands - a client cannot ask
+# for a screen position at all. Everything the main window opens hangs off the
+# main window by default, which is why a right-click in a popped-out machine
+# used to put its menu, and every dialog behind it, back on the main one.
+
+
+class Recorded:
+    """Stands in for a modal dialog: remembers its parent, opens nothing."""
+
+    opened: list = []
+
+    def __init__(self, parent, *args, **kwargs) -> None:
+        Recorded.opened.append(parent)
+
+    def exec(self):
+        from PySide6.QtWidgets import QDialog
+
+        return QDialog.DialogCode.Rejected
+
+
+@pytest.fixture
+def confirmations(monkeypatch):
+    """Confirmations recorded rather than shown, and service calls run inline.
+
+    run_task answers on a worker thread, so without this the dialog a reply
+    opens arrives after the test has finished - and the real one would sit there
+    modal with nothing to dismiss it.
+    """
+    import vmmanager.main_window as main_window
+
+    def inline(fn, done=None, failed=None) -> None:
+        try:
+            result = fn()
+        except Exception as e:  # noqa: BLE001 - the failed path, as run_task does
+            if failed:
+                failed(str(e))
+            return
+        if done:
+            done(result)
+
+    Recorded.opened = []
+    monkeypatch.setattr(main_window, "run_task", inline)
+    monkeypatch.setattr(main_window, "ConfirmDialog", Recorded)
+    monkeypatch.setattr(main_window, "confirmations_enabled", lambda: True)
+    return Recorded.opened
+
+
+def test_a_dialog_belongs_to_the_window_that_asked_for_it(main, machines, qapp,
+                                                          confirmations):
+    """Switching mode from a popped-out window confirms on that window."""
+    uuid = machines["test"].uuid
+    main._pop_out(uuid)
+    window = main._windows[uuid]
+
+    window.page.mode_switch.emit(uuid, "debug")
+    qapp.processEvents()
+
+    assert main._owner is window
+    assert confirmations == [window], (
+        "the confirmation should be parented to the window the machine is in, "
+        "not to the main window it was popped out of"
+    )
+
+
+def test_the_main_window_takes_ownership_back(main, machines, qapp, confirmations):
+    """The owner is whichever window asked last, not wherever it was left."""
+    uuid = machines["test"].uuid
+    main._pop_out(uuid)
+    window = main._windows[uuid]
+    window.page.mode_switch.emit(uuid, "debug")
+    qapp.processEvents()
+    assert main._owner is window
+
+    main.machines.bulk_action.emit([uuid], "force-off")
+    qapp.processEvents()
+    assert confirmations[-1] is main
+
+
+def test_the_menu_is_built_on_the_window_it_was_opened_from(main, machines, qapp):
+    """QMenu.exec never returns without a display, so the build is what a test
+    can look at - the same split the hardware tab uses."""
+    uuid = machines["test"].uuid
+    main._pop_out(uuid)
+    window = main._windows[uuid]
+
+    main._owner = window
+    assert main._build_menu(machines["test"]).parent() == window
+    main._owner = main
+    assert main._build_menu(machines["test"]).parent() == main
+
+
+def test_a_closed_window_stops_owning_dialogs(main, machines, qapp):
+    """A dialog parented to a window that has gone is a dialog nobody sees."""
+    uuid = machines["test"].uuid
+    main._pop_out(uuid)
+    main._owner = main._windows[uuid]
+
+    main._windows[uuid].close()
+    qapp.processEvents()
+    assert main._owner is main
+
+
 def test_quitting_closes_the_windows(main, machines, qapp):
     """A left-over window would keep the application alive after it was quit."""
     for machine in machines.values():

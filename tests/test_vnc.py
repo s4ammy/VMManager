@@ -19,6 +19,7 @@ import pytest
 from vmmanager.console.vnc import (
     ENC_COPYRECT,
     ENC_DESKTOP_SIZE,
+    ENC_EXTENDED_DESKTOP_SIZE,
     ENC_RAW,
     ENC_ZLIB,
     VncClient,
@@ -199,10 +200,13 @@ def test_client_asks_for_the_encodings_it_can_decode(client):
     handshake(c, sock)
     sent = bytes(sock.sent)
     # SetEncodings: type 2, then a count, then that many 32-bit encodings
-    start = sent.index(struct.pack(">BxH", 2, 4))
-    body = sent[start + 4 : start + 4 + 16]
-    offered = [struct.unpack(">i", body[i : i + 4])[0] for i in range(0, 16, 4)]
-    assert set(offered) == {ENC_ZLIB, ENC_COPYRECT, ENC_RAW, ENC_DESKTOP_SIZE}
+    start = sent.index(struct.pack(">BxH", 2, 5))
+    body = sent[start + 4 : start + 4 + 20]
+    offered = [struct.unpack(">i", body[i : i + 4])[0] for i in range(0, 20, 4)]
+    assert set(offered) == {
+        ENC_ZLIB, ENC_COPYRECT, ENC_RAW, ENC_DESKTOP_SIZE,
+        ENC_EXTENDED_DESKTOP_SIZE,
+    }
 
 
 # ---------------------------------------------------------------- decoders
@@ -300,3 +304,90 @@ def test_partial_delivery_is_buffered_until_complete(client):
     for i in range(0, len(rect), 3):
         feed(c, sock, rect[i : i + 3])
     assert c._image.pixelColor(0, 0).getRgb()[:3] == (0x33, 0x55, 0x77)
+
+
+# ------------------------------------------------- guest resolution (ext size)
+#
+# Checked against QEMU 11 as well as here: it answers a SetDesktopSize with
+# reason 1, result 4 - "forwarded to the guest" - and only sends the new size
+# once the guest's driver has actually changed mode.
+
+
+def ext_size_rect(reason, result, w, h, screens=((0, 0, 0, 0, 0, 0),)) -> bytes:
+    """An ExtendedDesktopSize pseudo-rect. x/y carry the reason and result."""
+    body = struct.pack(">Bxxx", len(screens))
+    for ident, sx, sy, sw, sh, flags in screens:
+        body += struct.pack(">IHHHHI", ident, sx, sy, sw or w, sh or h, flags)
+    return struct.pack(">HHHHi", reason, result, w, h,
+                       ENC_EXTENDED_DESKTOP_SIZE) + body
+
+
+def test_the_server_offering_ext_size_is_what_allows_a_resize(client):
+    """Before that rect arrives there is nothing to say the server takes one."""
+    c, sock = client
+    handshake(c, sock, width=8, height=4)
+    assert not c.can_resize_guest
+    assert c.request_guest_resolution(64, 48) is False
+
+    feed(c, sock, framebuffer_update([ext_size_rect(0, 0, 8, 4)]))
+    assert c.can_resize_guest
+    assert c.request_guest_resolution(64, 48) is True
+
+
+def test_a_resolution_request_is_a_well_formed_set_desktop_size(client):
+    c, sock = client
+    handshake(c, sock, width=8, height=4)
+    feed(c, sock, framebuffer_update([
+        ext_size_rect(0, 0, 8, 4, screens=((7, 0, 0, 8, 4, 0xABCD),))
+    ]))
+    sock.sent.clear()
+    c.request_guest_resolution(640, 480)
+
+    sent = bytes(sock.sent)
+    kind, width, height, count = struct.unpack(">BxHHBx", sent[:8])
+    ident, x, y, sw, sh, flags = struct.unpack(">IHHHHI", sent[8:24])
+    assert (kind, width, height, count) == (251, 640, 480, 1)
+    assert (x, y, sw, sh) == (0, 0, 640, 480)
+    assert (ident, flags) == (7, 0xABCD), (
+        "the screen's id and flags have to be echoed back, or the server has "
+        "no idea which screen is being resized"
+    )
+
+
+def test_a_size_the_guest_took_resizes_the_framebuffer(client):
+    c, sock = client
+    handshake(c, sock, width=8, height=4)
+    feed(c, sock, framebuffer_update([ext_size_rect(0, 0, 8, 4)]))
+    sock.sent.clear()
+
+    # the guest changed mode: reason 0, and the new size
+    feed(c, sock, framebuffer_update([ext_size_rect(0, 0, 64, 48)]))
+    assert (c._image.width(), c._image.height()) == (64, 48)
+    assert struct.pack(">BBHHHH", 3, 0, 0, 0, 64, 48) in bytes(sock.sent)
+
+
+def test_a_refused_request_leaves_the_framebuffer_alone(client):
+    """Result 3 is "invalid screen layout": nothing moved, so nothing here may."""
+    c, sock = client
+    handshake(c, sock, width=8, height=4)
+    feed(c, sock, framebuffer_update([ext_size_rect(0, 0, 8, 4)]))
+    feed(c, sock, framebuffer_update([ext_size_rect(1, 3, 64, 48)]))
+    assert (c._image.width(), c._image.height()) == (8, 4)
+
+
+def test_the_same_size_again_does_not_ask_for_another_full_update(client):
+    """QEMU repeats this rect on every full update.
+
+    Answering each one with another full-update request is a loop that never
+    stops asking - it saturated the connection and the CPU with it.
+    """
+    c, sock = client
+    handshake(c, sock, width=8, height=4)
+    feed(c, sock, framebuffer_update([ext_size_rect(0, 0, 8, 4)]))
+    sock.sent.clear()
+    feed(c, sock, framebuffer_update([ext_size_rect(0, 0, 8, 4)]))
+
+    full = struct.pack(">BBHHHH", 3, 0, 0, 0, 8, 4)
+    assert full not in bytes(sock.sent)
+    incremental = struct.pack(">BBHHHH", 3, 1, 0, 0, 8, 4)
+    assert incremental in bytes(sock.sent), "it should still ask for more of it"

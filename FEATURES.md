@@ -44,13 +44,28 @@ desktop's icon theme, or drawn as a last resort - so it works offline.
 ## Inside a machine
 
 Eight tabs. Open a machine in a **window of its own** from the button in its
-header, or by right-clicking it in the list, and work on several at once.
+header, or by right-clicking it in the list, and work on several at once. Its
+menus and dialogs open on that window, wherever you have put it.
 
 **Console** - a real console in the app, for both VNC and SPICE. Full keyboard
 and mouse, including relative-mode pointers and the guest's own cursor shapes.
 Clipboard in both directions, send-key combinations, screenshots. Consoles on
 remote hosts are tunnelled over SSH for you. Detach it into its own window with
 F11 for fullscreen.
+
+Clicking the display hands the **whole keyboard to the guest** - Alt+Tab, Super
+and this app's own shortcuts included - until you press the release combination
+(Ctrl+Alt by default, Settings changes it). Under Wayland the compositor keeps a
+few keys whatever a client asks for, and the hint line says so rather than
+pretending otherwise.
+
+**Display setup** tells you why a console is slower than it should be. A
+VGA-class display device has no accelerated driver to install, so the guest
+repaints the whole screen for every change and nothing can retarget its
+resolution - which is the usual answer to "I installed the virtio drivers and
+nothing improved". The check names it, and fixes it: the right display device
+for the connection, the SPICE agent channel, a tablet. The guest's resolution
+can then follow the window, on VNC as well as SPICE.
 
 **Serial** - a terminal on the machine's serial console, for when networking is
 broken and the graphical console tells you nothing.
@@ -82,6 +97,11 @@ you turn that off in Settings, and nothing on disk is deleted.
 - Disks and network cards, added and removed live, falling back to the next
   restart when live is not possible.
 - CD/DVD media changed or ejected.
+- The **virtio-win driver disc** attached in one step, from a copy already on
+  the host, from a storage pool, or downloaded. Windows cannot see a virtio disk
+  or network card until the drivers on that disc are installed, and where the
+  disc lives is remembered, so the next Windows machine is offered the same one
+  instead of another 700 MB.
 - vCPU count and memory, including live memory ballooning.
 - CPU model and topology, video model, sound, per-disk cache mode, input
   devices, boot order, machine type, boot menu, MAC addresses and link state.

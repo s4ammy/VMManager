@@ -52,6 +52,10 @@ class ToolboxMixin:
             _ghost("Send file…", self._send_file),
             _ghost("Fetch file…", self._fetch_file),
             _ghost("Windows guest tools…", self._windows_tooling),
+            # Not through the agent, but this is where someone setting a Windows
+            # guest up is already looking, and the drivers are what the agent
+            # needs to exist at all.
+            _ghost("Add virtio-win disc…", self._add_virtio_iso),
         ]))
 
         inspect_title = QLabel("Inspect the guest")

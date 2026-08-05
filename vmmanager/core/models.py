@@ -195,6 +195,77 @@ class GraphicsInfo:
     has_password: bool
 
 @dataclass(frozen=True)
+class DisplayHealth:
+    """Why the graphical console is as good, or as bad, as it is.
+
+    A guest cannot draw efficiently through a display device that has no driver
+    to drive: a plain VGA adapter is a framebuffer the guest repaints wholesale,
+    so every frame is a full-screen update however good the connection is, and
+    there is no mode to set, so nothing can resize it. Installing drivers in the
+    guest - virtio-win, say - changes nothing on its own if the device they are
+    drivers for is not the one the machine has.
+
+    This is the machine's side of that, read from its definition.
+    """
+
+    graphics: tuple[str, ...] = ()  # display types: vnc, spice
+    video_model: str = ""  # vga | qxl | virtio | bochs | …
+    accel3d: bool = False
+    spice_agent_channel: bool = False
+    tablet: bool = False
+    running: bool = False
+
+    # Devices the guest can drive properly: dirty rectangles instead of
+    # full-screen repaints, and a resolution that can be retargeted.
+    SMART_VIDEO = ("virtio", "qxl")
+
+    @property
+    def smart_video(self) -> bool:
+        return self.video_model in self.SMART_VIDEO
+
+    @property
+    def best_video(self) -> str:
+        """What this machine's display should be using.
+
+        QXL where SPICE is in play - it is the one with a signed Windows driver
+        in virtio-win and it carries the agent's resize - virtio-gpu otherwise.
+        """
+        return "qxl" if "spice" in self.graphics else "virtio"
+
+    def problems(self) -> list[tuple[str, str, str]]:
+        """(key, what, why) for everything holding the console back."""
+        out: list[tuple[str, str, str]] = []
+        if not self.graphics:
+            return out  # no display at all: a different conversation
+        if not self.smart_video:
+            out.append((
+                "video",
+                f"The display device is {self.video_model or 'unset'}, not "
+                f"{self.best_video}",
+                "A VGA-class adapter has no accelerated driver to install, so "
+                "the guest repaints the whole screen for every change and its "
+                "resolution cannot be set from here. This is usually the whole "
+                "answer to a console that feels slow after installing drivers.",
+            ))
+        if "spice" in self.graphics and not self.spice_agent_channel:
+            out.append((
+                "agent",
+                "No SPICE agent channel",
+                "The virtio-serial port spice-vdagent talks over. Without it "
+                "there is no shared clipboard and no resizing the guest to the "
+                "window, whatever is installed inside.",
+            ))
+        if not self.tablet:
+            out.append((
+                "tablet",
+                "No tablet device",
+                "Gives the console an absolute pointer. Without one the guest "
+                "gets relative motion, so the pointer has to be captured and "
+                "the two cursors drift apart.",
+            ))
+        return out
+
+@dataclass(frozen=True)
 class NetworkDef:
     name: str
     mode: str  # nat | isolated | bridge

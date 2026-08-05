@@ -7,6 +7,10 @@ from .common import *  # noqa: F403 - shared imports for the tab modules
 
 class ConsoleMixin:
     """Mixed into DetailPage; expects its attributes."""
+
+    _display_health = None  # last read of what the definition does for us
+    _hint_base = ""  # the hint without the display note, so it can be recomposed
+
     def _build_console(self) -> QWidget:
         from PySide6.QtWidgets import QStackedWidget
 
@@ -17,10 +21,12 @@ class ConsoleMixin:
         self.vnc = VncClient()
         self.vnc.state_changed.connect(self._console_state_changed)
         self.vnc.password_required.connect(self._vnc_ask_password)
+        self.vnc.grab_changed.connect(self._grab_changed)
         self.spice = SpiceClient()
         self.spice.state_changed.connect(self._console_state_changed)
         self.spice.mouse_mode_changed.connect(self._spice_mouse_hint)
         self.spice.capture_changed.connect(self._spice_capture_changed)
+        self.spice.grab_changed.connect(self._grab_changed)
         self.console_stack = QStackedWidget()
         self.console_stack.setMinimumHeight(300)
         self.console_stack.addWidget(self.vnc)
@@ -41,9 +47,13 @@ class ConsoleMixin:
             QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
         )
         row.addWidget(self.console_hint, 1)
+        # One button, two jobs: add a display when there is none to connect
+        # to, offer the display fixes when the one there is holds the console
+        # back. Both are "the machine's definition is why this is not working".
         self.console_fix = QPushButton("Add VNC display")
         self.console_fix.setProperty("class", "GhostButton")
-        self.console_fix.clicked.connect(self._add_vnc_display)
+        self._console_fix_job = "display"
+        self.console_fix.clicked.connect(self._console_fix_clicked)
         self.console_fix.hide()
         row.addWidget(self.console_fix)
         keys_btn = QPushButton("Send key ▾")
@@ -61,7 +71,9 @@ class ConsoleMixin:
         row.addWidget(detach_btn)
         more_btn = QPushButton("⋯")
         more_btn.setProperty("class", "IconButton")
-        more_btn.setToolTip("Reconnect, screenshot, external viewer")
+        more_btn.setToolTip(
+            "Reconnect, display setup, keyboard grab, screenshot, external viewer"
+        )
         more_btn.clicked.connect(lambda: self._console_more_menu(more_btn))
         row.addWidget(more_btn)
         box.addLayout(row)
@@ -70,6 +82,13 @@ class ConsoleMixin:
     def _console_more_menu(self, anchor: QPushButton) -> None:
         menu = QMenu(self)
         menu.addAction("Reconnect", lambda: self._connect_console(forced=True))
+        menu.addAction("Display setup…", self._display_setup)
+        client = self._active_client()
+        if client is not None and getattr(client, "grab", None) is not None:
+            if client.grab.held:
+                menu.addAction("Release the keyboard", client.release_input)
+            else:
+                menu.addAction("Send every key to the guest", client.take_input)
         menu.addAction("Save screenshot…", self._save_screenshot)
         menu.addAction(
             "Open in virt-viewer",
@@ -162,7 +181,11 @@ class ConsoleMixin:
             return
         self.console_fix.hide()
         if not self.uuid or not self._snap or self._snap.state != "running":
-            self.console_hint.setText("machine is not running")
+            # The best time to change a display device, in fact: it only takes
+            # effect on the next start anyway.
+            self._display_health = None
+            self._set_hint("machine is not running")
+            self._check_display_health()
             return
         uuid = self.uuid
 
@@ -180,7 +203,7 @@ class ConsoleMixin:
                 self.console_hint.setText(
                     f"no connectable display on this machine (has: {types})"
                 )
-                self.console_fix.show()
+                self._offer_fix("add-vnc", "Add VNC display")
                 return
             self._vnc_target = display
             if display.type == "vnc" and display.has_password and not self._vnc_password:
@@ -223,16 +246,40 @@ class ConsoleMixin:
         else:
             client.open_tcp(host, port, self._vnc_password)
 
+    def _set_hint(self, text: str) -> None:
+        """The resting hint, with whatever the display check found appended.
+
+        The note is composed on every set rather than appended to what is there,
+        because the resting text is put back each time a grab or a capture ends
+        - appending would stack up a copy of the note every time.
+        """
+        self._hint_base = text
+        problems = self._display_health.problems() if self._display_health else []
+        note = f" · {problems[0][1].lower()}" if problems else ""
+        self.console_hint.setText(text + note)
+
+    def _connected_hint(self) -> str:
+        """The line under an idle, connected console."""
+        from ...console.grab import grab_on_click, release_combo_name
+
+        proto = "spice" if self._active_client() is self.spice else "vnc"
+        tunneled = " · ssh tunnel" if self._tunnel is not None else ""
+        how = (
+            f"click the display to send every key to the guest, "
+            f"{release_combo_name()} to release"
+            if grab_on_click()
+            else "click to type, Tab and arrows go to the guest"
+        )
+        return f"interactive {proto}{tunneled} · {how}"
+
     def _console_state_changed(self, state: str) -> None:
         client = self._active_client()
         if state == "connected":
-            proto = "spice" if client is self.spice else "vnc"
-            tunneled = " · ssh tunnel" if self._tunnel is not None else ""
-            self.console_hint.setText(
-                f"interactive {proto}{tunneled} · click to type, Tab and arrows go to the guest"
-            )
+            self._display_health = None  # re-read for whatever we just opened
+            self._set_hint(self._connected_hint())
             if client is not None:
                 client.setFocus()
+            self._check_display_health()
         elif state == "connecting":
             self.console_hint.setText("connecting…")
         elif state == "closed":
@@ -241,25 +288,125 @@ class ConsoleMixin:
             self.console_hint.setText(state)
 
     def _spice_mouse_hint(self, mode: int) -> None:
+        from ...console.grab import release_combo_name
+
         if not self.spice.active:
             return
         if mode == SpiceClient.MOUSE_SERVER:
             self.console_hint.setText(
                 "relative mouse, click the display to capture the pointer, "
-                "Ctrl+Alt to release"
+                f"{release_combo_name()} to release"
             )
         else:
-            self._console_state_changed("connected")
+            self._set_hint(self._connected_hint())
 
     def _spice_capture_changed(self, captured: bool) -> None:
+        from ...console.grab import release_combo_name
+
         if captured:
             self.console_hint.setText(
-                "pointer captured: the guest owns your mouse · Ctrl+Alt to release"
+                "pointer captured: the guest owns your mouse · "
+                f"{release_combo_name()} to release"
             )
         elif self.spice.active:
-            self.console_hint.setText(
-                "pointer released, click the display to capture it again"
-            )
+            self._set_hint(self._connected_hint())
+
+
+    def _grab_changed(self, held: bool) -> None:
+        client = self._active_client()
+        if client is None:
+            return
+        if held:
+            self.console_hint.setText(client.grab.hint())
+        else:
+            self._set_hint(self._connected_hint())
+
+    # -- what the machine's own definition does to the console
+
+    def _check_display_health(self) -> None:
+        """After connecting, say whether the machine can do better than this.
+
+        Installing drivers in the guest cannot help a device that has no
+        accelerated driver to install, and this is where that gets said - next
+        to the console someone is looking at while wondering why.
+        """
+        uuid = self.uuid
+
+        def apply(health) -> None:
+            if self.uuid != uuid:
+                return
+            self._display_health = health
+            problems = health.problems()
+            if not problems:
+                return
+            self._offer_fix("display", "Improve display…")
+            self._set_hint(self._hint_base)
+
+        run_task(
+            lambda: svc_display_health(uuid), done=apply, failed=lambda _m: None
+        )
+
+    def _offer_fix(self, job: str, label: str) -> None:
+        self._console_fix_job = job
+        self.console_fix.setText(label)
+        self.console_fix.show()
+
+    def _console_fix_clicked(self) -> None:
+        if self._console_fix_job == "add-vnc":
+            self._add_vnc_display()
+        else:
+            self._display_setup()
+
+    def _display_setup(self) -> None:
+        uuid = self.uuid
+        if not uuid:
+            return
+        name = self._snap.name if self._snap else "this machine"
+
+        def show(health) -> None:
+            if self.uuid != uuid:
+                return
+            self._display_health = health
+            dialog = DisplayFixDialog(self, name, health)
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return
+            from ...pages.settings import save_console_resize_guest
+
+            save_console_resize_guest(dialog.resize_guest.isChecked())
+            if dialog.actions:
+                self._apply_display_fixes(uuid, health, dialog.actions)
+
+        run_task(
+            lambda: svc_display_health(uuid),
+            done=show,
+            failed=lambda m: ErrorDialog(self, "Couldn't read the display", m).exec(),
+        )
+
+    def _apply_display_fixes(self, uuid: str, health, keys: list[str]) -> None:
+        """Each fix is one definition edit; they are applied in one go."""
+        work = {
+            "video": lambda: svc_set_video(uuid, health.best_video),
+            "agent": lambda: svc_add_spice_agent_channel(uuid),
+            "tablet": lambda: svc_attach_input(uuid, "tablet", "usb"),
+        }
+
+        def apply_all() -> str:
+            done = [work[k]() for k in keys if k in work]
+            return " · ".join(str(d) for d in done)
+
+        def finished(message: str) -> None:
+            if self.uuid != uuid:
+                return
+            self.console_fix.hide()
+            tail = (" Start it again to pick up the new display device."
+                    if health.running else "")
+            self.console_hint.setText(f"display updated - {message}{tail}")
+
+        run_task(
+            apply_all,
+            done=finished,
+            failed=lambda m: ErrorDialog(self, "Display change failed", m).exec(),
+        )
 
     def _vnc_ask_password(self) -> None:
         dialog = VncPasswordDialog(self)

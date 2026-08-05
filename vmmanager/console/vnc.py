@@ -11,17 +11,19 @@ from __future__ import annotations
 import struct
 import zlib
 
-from PySide6.QtCore import QPoint, QRect, Qt, Signal
+from PySide6.QtCore import QPoint, QRect, Qt, QTimer, Signal
 from PySide6.QtGui import QImage, QPainter
 from PySide6.QtNetwork import QAbstractSocket, QLocalSocket, QTcpSocket
 from PySide6.QtWidgets import QApplication, QWidget
 
 from .. import theme
+from .grab import InputGrab, grab_on_click, release_combo
 
 ENC_RAW = 0
 ENC_COPYRECT = 1
 ENC_ZLIB = 6
 ENC_DESKTOP_SIZE = -223
+ENC_EXTENDED_DESKTOP_SIZE = -308  # lets the client ask for a resolution
 
 
 # ---------------------------------------------------------------- DES (VNC auth)
@@ -185,12 +187,16 @@ class VncClient(QWidget):
 
     state_changed = Signal(str)  # "connecting" | "connected" | "closed" | error text
     password_required = Signal()
+    grab_changed = Signal(bool)  # keyboard handed to the guest
 
     def __init__(self) -> None:
         super().__init__()
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setMouseTracking(True)
         self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent)
+        self.grab = InputGrab(self)
+        self.grab.changed.connect(self.grab_changed)
+        self._held: dict[int, int] = {}  # qt key -> keysym currently down
         self._sock: QTcpSocket | QLocalSocket | None = None
         self._buf = bytearray()
         self._need = 0
@@ -204,6 +210,16 @@ class VncClient(QWidget):
         self._rects_left = 0
         self._rect_head: tuple[int, int, int, int, int] | None = None
         self._server_name = ""
+        # Filled in by the server's first ExtendedDesktopSize rect, which is
+        # also what says it will accept a resolution from us at all.
+        self._screens: list[tuple[int, int, int, int, int, int]] = []
+        self._can_resize = False
+        self._resize_timer = QTimer(self)  # while a window is being dragged
+        self._resize_timer.setSingleShot(True)
+        self._resize_timer.setInterval(600)
+        self._resize_timer.timeout.connect(
+            lambda: self.request_guest_resolution(self.width(), self.height())
+        )
 
     # -- lifecycle
 
@@ -212,6 +228,14 @@ class VncClient(QWidget):
         self._password = password
         sock = QTcpSocket(self)
         self._sock = sock
+        # Nagle's algorithm holds a small write back waiting for company. Every
+        # keystroke and pointer move here is a small write, and the delay it
+        # adds is exactly the lag you feel while typing.
+        sock.connected.connect(
+            lambda: sock.setSocketOption(
+                QAbstractSocket.SocketOption.LowDelayOption, 1
+            )
+        )
         sock.readyRead.connect(self._on_ready_read)
         sock.errorOccurred.connect(
             lambda _e: self._fail(sock.errorString())
@@ -234,6 +258,7 @@ class VncClient(QWidget):
         sock.connectToServer(path)
 
     def close_connection(self) -> None:
+        self.release_input()
         if self._sock is not None:
             self._sock.blockSignals(True)
             self._sock.abort() if isinstance(self._sock, QTcpSocket) else self._sock.abort()
@@ -244,6 +269,9 @@ class VncClient(QWidget):
         self._active = False
         self._rects_left = 0
         self._rect_head = None
+        self._screens = []
+        self._can_resize = False
+        self._held.clear()
         self.update()
 
     @property
@@ -376,7 +404,8 @@ class VncClient(QWidget):
             ">BBBBHHHBBBxxx", 32, 24, 0, 1, 255, 255, 255, 16, 8, 0
         )
         self._send(struct.pack(">Bxxx", 0) + pixfmt)  # SetPixelFormat
-        encodings = [ENC_ZLIB, ENC_COPYRECT, ENC_RAW, ENC_DESKTOP_SIZE]
+        encodings = [ENC_ZLIB, ENC_COPYRECT, ENC_RAW,
+                     ENC_EXTENDED_DESKTOP_SIZE, ENC_DESKTOP_SIZE]
         self._send(
             struct.pack(">BxH", 2, len(encodings))
             + b"".join(struct.pack(">i", e) for e in encodings)
@@ -452,8 +481,78 @@ class VncClient(QWidget):
             self._resize_fb(w, h)
             self._request_update(incremental=False)
             self._next_rect()
+        elif enc == ENC_EXTENDED_DESKTOP_SIZE:
+            self._expect(4, self._on_screen_count)
         else:
             self._fail(f"server sent unrequested encoding {enc}")
+
+    # -- guest resolution (ExtendedDesktopSize)
+    #
+    # The server answers our request for this pseudo-encoding with one rect
+    # describing the screens it has, and that rect arriving is what says it will
+    # take a resolution from us at all. QEMU only offers it when the display
+    # device can be retargeted - virtio-gpu or QXL, with the driver loaded in
+    # the guest. On a plain VGA adapter there is no mode to set, which is why
+    # the display check offers to change the device rather than the setting.
+
+    def _on_screen_count(self, data: bytes) -> None:
+        self._expect(data[0] * 16, self._on_screens)
+
+    def _on_screens(self, data: bytes) -> None:
+        reason, result, w, h, _enc = self._rect_head
+        self._screens = [
+            struct.unpack(">IHHHHI", data[i : i + 16])
+            for i in range(0, len(data) - 15, 16)
+        ]
+        self._can_resize = True
+        # reason 0 is the server telling us the size changed; 1 and 2 are an
+        # answer to a request, where a non-zero result means it was refused and
+        # the framebuffer has not moved.
+        #
+        # QEMU repeats this rect on every full update, so the size is compared
+        # rather than trusted: re-asking for a full update each time it arrives
+        # is a loop that never stops asking.
+        moved = self._image is None or (w, h) != (
+            self._image.width(), self._image.height()
+        )
+        if moved and (reason == 0 or result == 0):
+            self._resize_fb(w, h)
+            self._request_update(incremental=False)
+        self._next_rect()
+
+    @property
+    def can_resize_guest(self) -> bool:
+        """Whether the server said it would take a resolution from us."""
+        return self._can_resize
+
+    def request_guest_resolution(self, width: int, height: int) -> bool:
+        """Ask the guest for a resolution. False if it cannot be asked."""
+        if not self._active or not self._can_resize:
+            return False
+        # Widths that are not a multiple of 4 come back rounded or refused on
+        # some drivers, and a zero-sized screen is not a screen.
+        width = max(64, width - width % 4)
+        height = max(64, height)
+        ident, flags = (self._screens[0][0], self._screens[0][5]) if self._screens else (0, 0)
+        self._send(
+            struct.pack(">BxHHBx", 251, width, height, 1)
+            + struct.pack(">IHHHHI", ident, 0, 0, width, height, flags)
+        )
+        return True
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt's name
+        """Ask the guest to match the window, if the preference says so."""
+        super().resizeEvent(event)
+        if not self._active or not self._can_resize:
+            return
+        try:
+            from ..pages.settings import console_resize_guest
+
+            wanted = console_resize_guest()
+        except Exception:  # noqa: BLE001 - preferences are optional
+            wanted = False
+        if wanted:
+            self._resize_timer.start()
 
     def _resize_fb(self, w: int, h: int) -> None:
         old = self._image
@@ -585,6 +684,10 @@ class VncClient(QWidget):
 
     def mousePressEvent(self, event) -> None:
         self.setFocus(Qt.FocusReason.MouseFocusReason)
+        # Clicking into the display is the point at which someone is working in
+        # the guest rather than in the app around it.
+        if grab_on_click():
+            self.take_input()
         self._buttons |= self._BUTTON_BITS.get(event.button(), 0)
         self._send_pointer(event.position())
 
@@ -612,10 +715,48 @@ class VncClient(QWidget):
             self._send(struct.pack(">BBxxI", 4, 1 if down else 0, keysym))
 
     def keyPressEvent(self, event) -> None:
-        self._send_key(qt_key_to_keysym(event), True)
+        keysym = qt_key_to_keysym(event)
+        self._held[event.key()] = keysym
+        if self.grab.held and release_combo() <= set(self._held):
+            self.release_input()
+            return
+        self._send_key(keysym, True)
 
     def keyReleaseEvent(self, event) -> None:
-        self._send_key(qt_key_to_keysym(event), False)
+        keysym = self._held.pop(event.key(), None) or qt_key_to_keysym(event)
+        self._send_key(keysym, False)
+
+    def _release_held_keys(self) -> None:
+        """Let go of everything we sent down, so nothing sticks in the guest.
+
+        A key held when the grab ends - the Ctrl and Alt of the release
+        combination, always - would otherwise stay down in the guest for good:
+        its release event goes to whoever has the keyboard next.
+        """
+        for keysym in self._held.values():
+            self._send_key(keysym, False)
+        self._held.clear()
+
+    # -- input grab
+
+    def take_input(self) -> None:
+        """Everything the keyboard does goes to the guest from here."""
+        if self._active:
+            self.grab.take()
+
+    def release_input(self) -> None:
+        if not self.grab.held:
+            return
+        self._release_held_keys()
+        self.grab.release()
+
+    def focusOutEvent(self, event) -> None:  # noqa: N802 - Qt's name
+        self.release_input()
+        super().focusOutEvent(event)
+
+    def hideEvent(self, event) -> None:  # noqa: N802 - Qt's name
+        self.release_input()
+        super().hideEvent(event)
 
     def send_combo(self, keysyms: list[int]) -> None:
         for ks in keysyms:

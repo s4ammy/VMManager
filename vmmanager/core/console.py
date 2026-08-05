@@ -8,7 +8,33 @@ import libvirt
 
 from .connection import _with_conn
 from .devices import _APPLIED_CONFIG
-from .models import GraphicsInfo
+from .models import DisplayHealth, GraphicsInfo
+
+def svc_display_health(uuid: str) -> DisplayHealth:
+    """What the machine's own definition does for its graphical console."""
+
+    def go(conn):
+        dom = conn.lookupByUUIDString(uuid)
+        root = ET.fromstring(dom.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE))
+        model = root.find("devices/video/model")
+        accel = model.find("acceleration") if model is not None else None
+        return DisplayHealth(
+            graphics=tuple(
+                g.get("type", "?") for g in root.findall("devices/graphics")
+            ),
+            video_model=(model.get("type") or "") if model is not None else "",
+            accel3d=accel is not None and accel.get("accel3d") == "yes",
+            spice_agent_channel=any(
+                t.get("name") == "com.redhat.spice.0"
+                for t in root.findall("devices/channel/target")
+            ),
+            tablet=any(
+                i.get("type") == "tablet" for i in root.findall("devices/input")
+            ),
+            running=bool(dom.isActive()),
+        )
+
+    return _with_conn(go)
 
 def svc_graphics_info(uuid: str) -> list[GraphicsInfo]:
     def go(conn):

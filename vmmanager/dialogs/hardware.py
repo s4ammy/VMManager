@@ -28,6 +28,10 @@ from PySide6.QtWidgets import (
 )
 from .. import theme
 from .base import SizedDialog, _buttons, _field_label, _title
+# "From pool…" is how a remote host's storage is browsed, and three dialogs here
+# offer it. storage.py imports nothing from this module, so this way round is
+# safe.
+from .storage import VolumePickerDialog
 
 
 class AttachDiskDialog(SizedDialog):
@@ -618,7 +622,7 @@ class WindowsToolingDialog(SizedDialog):
             btn.clicked.connect(lambda: (setattr(self, "action", key), self.accept()))
             buttons.addWidget(btn)
 
-        add_action("Get virtio-win disc", "iso", not state.get("iso_attached"))
+        add_action("Add virtio-win disc…", "iso", not state.get("iso_attached"))
         add_action("Add agent channel", "agent", not state.get("agent_channel"))
         add_action("Add SPICE channel", "spice", not state.get("spice_agent_channel"))
         add_action("Add tablet", "tablet", not state.get("tablet"))
@@ -628,6 +632,227 @@ class WindowsToolingDialog(SizedDialog):
         close.clicked.connect(self.reject)
         buttons.addWidget(close)
         box.addLayout(buttons)
+
+
+class DisplayFixDialog(SizedDialog):
+    """What is holding the graphical console back, and the fixes for it.
+
+    The complaint this answers is "I installed the drivers and the console is
+    still slow and still will not resize". Almost always the machine has a
+    VGA-class display device, which no driver accelerates and whose resolution
+    nothing can retarget - so the guest side was never the problem.
+    """
+
+    def __init__(self, parent, vm_name: str, health) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Display setup")
+        self.setMinimumWidth(660)
+        self.actions: list[str] = []  # fix keys, in the order they are applied
+        self._health = health
+        problems = health.problems()
+        box = QVBoxLayout(self)
+        box.setContentsMargins(24, 22, 24, 20)
+        box.setSpacing(10)
+        box.addWidget(_title(f"Display setup - {vm_name}"))
+
+        summary = QLabel(
+            f"Display: {', '.join(health.graphics) or 'none'} · "
+            f"device: {health.video_model or 'none'}"
+        )
+        summary.setProperty("class", "Dim")
+        box.addWidget(summary)
+
+        if not problems:
+            good = QLabel(
+                "Nothing to fix: the machine has an accelerated display device, "
+                "the agent channel it needs, and an absolute pointer. If the "
+                "console still feels slow, the guest's own driver for this "
+                "device is the next thing to check - on Windows that is the "
+                "virtio-win disc."
+            )
+            good.setWordWrap(True)
+            box.addWidget(good)
+        for key, what, why in problems:
+            row = QHBoxLayout()
+            mark = QLabel("○")
+            mark.setFixedWidth(18)
+            mark.setProperty("class", "Faint")
+            text = QLabel(f"<b>{what}</b><br>{why}")
+            text.setWordWrap(True)
+            text.setTextFormat(Qt.TextFormat.RichText)
+            text.setProperty("class", "Dim")
+            row.addWidget(mark, alignment=Qt.AlignmentFlag.AlignTop)
+            row.addWidget(text, 1)
+            box.addLayout(row)
+
+        if problems and health.running:
+            live = QLabel(
+                "The machine is running. A display device is not something "
+                "libvirt can swap under a guest, so this applies on its next "
+                "start."
+            )
+            live.setWordWrap(True)
+            live.setObjectName("ConsoleHint")
+            box.addWidget(live)
+
+        self.resize_guest = QCheckBox(
+            "Resize the guest's resolution to match the console window"
+        )
+        self.resize_guest.setToolTip(
+            "Needs an accelerated display device and, on SPICE, the agent - "
+            "which is what the rest of this dialog is about."
+        )
+        try:
+            from ..pages.settings import console_resize_guest
+
+            self.resize_guest.setChecked(console_resize_guest())
+        except Exception:  # noqa: BLE001 - preferences are optional
+            pass
+        box.addWidget(self.resize_guest)
+
+        box.addSpacing(6)
+        buttons = QHBoxLayout()
+        buttons.setSpacing(8)
+        for key, what, _why in problems:
+            btn = QPushButton(self.LABELS.get(key, what))
+            btn.setProperty("class", "GhostButton")
+            btn.clicked.connect(
+                lambda _=False, k=key: (self.actions.append(k), self.accept())
+            )
+            buttons.addWidget(btn)
+        buttons.addStretch(1)
+        if len(problems) > 1:
+            every = QPushButton("Fix all of it")
+            every.setProperty("class", "PrimaryButton")
+            every.clicked.connect(
+                lambda: (self.actions.extend(k for k, _w, _y in problems),
+                         self.accept())
+            )
+            buttons.addWidget(every)
+        close = QPushButton("Close")
+        close.setProperty("class", "GhostButton")
+        close.clicked.connect(self.accept)  # the resize tick box is still a result
+        buttons.addWidget(close)
+        box.addLayout(buttons)
+
+    LABELS = {
+        "video": "Change the display device",
+        "agent": "Add the agent channel",
+        "tablet": "Add a tablet",
+    }
+
+
+class VirtioIsoDialog(SizedDialog):
+    """Say where the virtio-win disc is, and offer to remember it.
+
+    Windows ships no virtio driver, so a machine given virtio disks boots to an
+    installer that cannot see them until this disc is mounted and the drivers
+    are loaded off it. The same disc serves every Windows guest and downloading
+    it is 700 MB a time, so a path picked here comes back already filled in for
+    the next machine - which is what the tick box is for.
+    """
+
+    def __init__(self, parent, saved: str = "", found=(), pools=(),
+                 remote: bool = False) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("virtio-win driver disc")
+        self.setMinimumWidth(560)
+        self._pools = pools
+        self.download = False  # set when the user asks for a fresh copy instead
+        box = QVBoxLayout(self)
+        box.setContentsMargins(24, 22, 24, 20)
+        box.setSpacing(10)
+        box.addWidget(_title("Add the virtio-win driver disc"))
+        note = QLabel(
+            "Attaches the disc as a second optical drive. In Windows, load the "
+            "storage driver from it during setup, or run "
+            "<b>virtio-win-guest-tools.exe</b> off it on an installed system to "
+            "get every driver and both agents in one pass."
+        )
+        note.setWordWrap(True)
+        note.setTextFormat(Qt.TextFormat.RichText)
+        note.setProperty("class", "Dim")
+        box.addWidget(note)
+
+        box.addWidget(_field_label("disc image"))
+        # Editable, so a path can be typed or pasted, with everything already
+        # known about listed under the arrow: what was remembered first, then
+        # whatever is lying around on this host.
+        self.path = QComboBox()
+        self.path.setEditable(True)
+        for candidate in [saved, *found]:
+            if candidate and self.path.findText(candidate) < 0:
+                self.path.addItem(candidate)
+        self.path.setCurrentText(saved or (found[0] if found else ""))
+        self.path.lineEdit().setPlaceholderText(
+            "/usr/share/virtio-win/virtio-win.iso"
+        )
+        row = QHBoxLayout()
+        row.addWidget(self.path, 1)
+        pool_browse = QPushButton("From pool…")
+        pool_browse.setProperty("class", "GhostButton")
+        pool_browse.clicked.connect(self._pick_volume)
+        row.addWidget(pool_browse)
+        if not remote:
+            browse = QPushButton("Browse…")
+            browse.setProperty("class", "GhostButton")
+            browse.clicked.connect(self._pick)
+            row.addWidget(browse)
+        box.addLayout(row)
+
+        if found:
+            hint = QLabel(f"Found on this host: {found[0]}")
+            hint.setWordWrap(True)
+            hint.setObjectName("ConsoleHint")
+            box.addWidget(hint)
+        elif remote:
+            hint = QLabel(
+                "This is a remote connection, so the path has to be one the "
+                "host can read - pick it out of a storage pool."
+            )
+            hint.setWordWrap(True)
+            hint.setObjectName("ConsoleHint")
+            box.addWidget(hint)
+
+        self.remember = QCheckBox("Remember this disc for the next machine")
+        self.remember.setChecked(True)
+        box.addWidget(self.remember)
+
+        box.addSpacing(6)
+        buttons = _buttons(self, "Attach disc")
+        get_one = QPushButton("Download the latest…")
+        get_one.setProperty("class", "GhostButton")
+        get_one.setToolTip(
+            "Fetches the disc from the virtio-win project and imports it into "
+            "the default pool. About 700 MB."
+        )
+        get_one.clicked.connect(
+            lambda: (setattr(self, "download", True), self.accept())
+        )
+        buttons.insertWidget(0, get_one)
+        box.addLayout(buttons)
+
+        self.path.currentTextChanged.connect(
+            lambda text: self._ok_button.setEnabled(bool(text.strip()))
+        )
+        self._ok_button.setEnabled(bool(self.path.currentText().strip()))
+
+    def chosen_path(self) -> str:
+        return self.path.currentText().strip()
+
+    def _pick(self) -> None:
+        start = self.chosen_path() or "/usr/share/virtio-win"
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Choose the virtio-win disc", start,
+            "Disc images (*.iso);;All files (*)",
+        )
+        if path:
+            self.path.setCurrentText(path)
+
+    def _pick_volume(self) -> None:
+        picker = VolumePickerDialog(self, self._pools)
+        if picker.exec() == QDialog.DialogCode.Accepted and picker.selected_path():
+            self.path.setCurrentText(picker.selected_path())
 
 
 class ChoiceDialog(SizedDialog):

@@ -130,26 +130,29 @@ class MainWindow(QMainWindow):
                      self.networks, self.themes, self.settings):
             self.stack.addWidget(page)
 
-        self.machines.action.connect(self._domain_action)
-        self.machines.open_detail.connect(self._open_detail)
-        self.machines.context.connect(self._show_menu)
-        self.machines.new_vm.connect(self._new_vm)
-        self.machines.restore_file.connect(self._restore_from_file)
-        self.machines.import_backup.connect(self._import_backup)
-        self.machines.bulk_action.connect(self._bulk_action)
-        self.machines.health_updated.connect(self._on_health_alert)
         # One window per machine, keyed by uuid. See _pop_out.
         self._windows: dict[str, MachineWindow] = {}
+        # The window whatever is happening now belongs to. See _owned.
+        self._owner: QWidget = self
+
+        self.machines.action.connect(self._domain_action)
+        self.machines.open_detail.connect(self._open_detail)
+        self.machines.context.connect(self._owned(self, self._show_menu))
+        self.machines.new_vm.connect(self._owned(self, self._new_vm))
+        self.machines.restore_file.connect(
+            self._owned(self, self._restore_from_file)
+        )
+        self.machines.import_backup.connect(self._owned(self, self._import_backup))
+        self.machines.bulk_action.connect(self._owned(self, self._bulk_action))
+        self.machines.health_updated.connect(self._on_health_alert)
 
         self.detail.back.connect(lambda: self._navigate("Machines"))
         self.detail.pop_out.connect(self._pop_out)
         self.detail.action.connect(self._domain_action)
-        self.detail.menu_requested.connect(self._show_menu)
-        self.detail.mode_switch.connect(self._switch_mode_direct)
+        self.detail.menu_requested.connect(self._owned(self, self._show_menu))
+        self.detail.mode_switch.connect(self._owned(self, self._switch_mode_direct))
         self.detail.modes_requested.connect(
-            lambda uuid: self._edit_modes(
-                next((d for d in self._domains if d.uuid == uuid), None)
-            )
+            self._owned(self, lambda uuid: self._edit_modes(self._snap_for(uuid)))
         )
         self.templates_page.open_machine.connect(self._open_detail)
         self.settings.connection_changed.connect(self._switch_connection)
@@ -167,8 +170,13 @@ class MainWindow(QMainWindow):
         self.worker.start()
 
         QShortcut(QKeySequence("F5"), self, activated=self.worker.poke)
-        QShortcut(QKeySequence("Ctrl+N"), self, activated=self._new_vm)
-        QShortcut(QKeySequence("Ctrl+K"), self, activated=self._open_palette)
+        QShortcut(
+            QKeySequence("Ctrl+N"), self, activated=self._owned(self, self._new_vm)
+        )
+        QShortcut(
+            QKeySequence("Ctrl+K"), self,
+            activated=self._owned(self, self._open_palette),
+        )
 
         self.worker.xml_changed.connect(self.stats.record_xml)
         self._schedule_timer = QTimer(self)
@@ -262,6 +270,28 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------- machine windows
 
+    def _owned(self, window: QWidget, slot):
+        """Wrap a slot so whatever it opens belongs to `window`.
+
+        A menu or a dialog is placed relative to the window it belongs to -
+        under Wayland there is no way for a client to ask for a screen position
+        at all, so its parent is the only thing that decides where it lands.
+        Everything here hangs off the main window by default, which put the
+        right-click menu and every dialog behind it back on the main window even
+        when the machine they were about was in a window of its own.
+
+        The wrapper records which window asked before the slot runs; `_owner` is
+        what the dialogs are then parented to. It stays put until the next
+        request, so a dialog opened from a menu action - or from a service call
+        that answers later - lands on the same window as the menu did.
+        """
+
+        def called(*args):
+            self._owner = window
+            return slot(*args)
+
+        return called
+
     def _pop_out(self, uuid: str) -> None:
         """Give this machine a window of its own."""
         existing = self._windows.get(uuid)
@@ -275,16 +305,15 @@ class MainWindow(QMainWindow):
         window = MachineWindow(snap, self._host)
         page = window.page
         page.action.connect(self._domain_action)
-        page.menu_requested.connect(self._show_menu)
-        page.mode_switch.connect(self._switch_mode_direct)
+        # Anything these open belongs to the new window, not to this one.
+        page.menu_requested.connect(self._owned(window, self._show_menu))
+        page.mode_switch.connect(self._owned(window, self._switch_mode_direct))
         page.modes_requested.connect(
-            lambda u: self._edit_modes(
-                next((d for d in self._domains if d.uuid == u), None)
-            )
+            self._owned(window, lambda u: self._edit_modes(self._snap_for(u)))
         )
         page.back.connect(window.close)
         page.pop_out.connect(window.close)  # nothing to pop out of a window
-        window.closed.connect(self._windows.pop)
+        window.closed.connect(self._forget_window)
         self._windows[uuid] = window
         window.show()
         self._load_modes_for(uuid)
@@ -293,6 +322,15 @@ class MainWindow(QMainWindow):
         # the list rather than leaving a copy of it behind.
         if self.stack.currentWidget() is self.detail and self.detail.uuid == uuid:
             self._navigate("Machines")
+
+    def _forget_window(self, uuid: str) -> None:
+        """Drop a closed window, and stop parenting dialogs to it.
+
+        A dialog given a closed window as its parent is a dialog nobody can see.
+        """
+        window = self._windows.pop(uuid, None)
+        if window is not None and self._owner is window:
+            self._owner = self
 
     def _raise_window(self, window: MachineWindow) -> None:
         window.showNormal()
@@ -416,10 +454,20 @@ class MainWindow(QMainWindow):
         snap = self._snap_for(uuid)
         if snap is None:
             return
+        self._build_menu(snap).exec(global_pos)
+
+    def _build_menu(self, snap: DomainSnapshot) -> QMenu:
+        """Separate from showing it: QMenu.exec never returns without a display,
+        so this is the part a test can look at.
+
+        The menu belongs to `_owner` - the window it was asked for from - because
+        that is what decides where a popup is put on screen.
+        """
+        uuid = snap.uuid
         running = snap.state == "running"
         paused = snap.state in ("paused", "suspended")
 
-        menu = QMenu(self)
+        menu = QMenu(self._owner)
         menu.addAction(
             "Raise its window" if uuid in self._windows else "Open in a window",
             lambda: self._pop_out(uuid),
@@ -480,12 +528,12 @@ class MainWindow(QMainWindow):
         menu.addAction("Open in virt-manager", lambda: open_external(uuid, "manager"))
         menu.addSeparator()
         menu.addAction("Delete…", lambda: self._delete(snap))
-        menu.exec(global_pos)
+        return menu
 
     def _confirm(self, title: str, body: str, ok_text: str) -> bool:
         if not confirmations_enabled():
             return True
-        confirm = ConfirmDialog(self, title, body, ok_text)
+        confirm = ConfirmDialog(self._owner, title, body, ok_text)
         return confirm.exec() == QDialog.DialogCode.Accepted
 
     def _force_off(self, snap: DomainSnapshot) -> None:
@@ -507,7 +555,7 @@ class MainWindow(QMainWindow):
 
     def _save_to_file(self, snap: DomainSnapshot) -> None:
         path, _ = QFileDialog.getSaveFileName(
-            self, "Save machine state", f"{snap.name}.vmstate", "VM state (*.vmstate)"
+            self._owner, "Save machine state", f"{snap.name}.vmstate", "VM state (*.vmstate)"
         )
         if not path:
             return
@@ -515,24 +563,24 @@ class MainWindow(QMainWindow):
         run_task(
             lambda: svc_save_to_file(uuid, path),
             done=lambda _: self.worker.poke(),
-            failed=lambda m: ErrorDialog(self, "Save failed", m).exec(),
+            failed=lambda m: ErrorDialog(self._owner, "Save failed", m).exec(),
         )
 
     def _restore_from_file(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
-            self, "Restore machine state", "", "VM state (*.vmstate);;All files (*)"
+            self._owner, "Restore machine state", "", "VM state (*.vmstate);;All files (*)"
         )
         if not path:
             return
         run_task(
             lambda: svc_restore_from_file(path),
             done=lambda _: self.worker.poke(),
-            failed=lambda m: ErrorDialog(self, "Restore failed", m).exec(),
+            failed=lambda m: ErrorDialog(self._owner, "Restore failed", m).exec(),
         )
 
     def _migrate(self, snap: DomainSnapshot) -> None:
         others = [u for u in saved_connections() if u != current_uri()]
-        dialog = MigrateDialog(self, snap.name, others)
+        dialog = MigrateDialog(self._owner, snap.name, others)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         dest = dialog.uri.currentText().strip()
@@ -553,18 +601,18 @@ class MainWindow(QMainWindow):
         run_task(
             lambda: svc_migrate_advanced(uuid, dest, **options),
             done=lambda _: self.worker.poke(),
-            failed=lambda m: ErrorDialog(self, "Migration failed", m).exec(),
+            failed=lambda m: ErrorDialog(self._owner, "Migration failed", m).exec(),
         )
 
     def _clone(self, snap: DomainSnapshot) -> None:
         if snap.state != "shutoff":
             ErrorDialog(
-                self, "Can't clone", "Shut the machine down before cloning."
+                self._owner, "Can't clone", "Shut the machine down before cloning."
             ).exec()
             return
 
         def show(disks) -> None:
-            dialog = CloneDetailsDialog(self, snap.name, disks)
+            dialog = CloneDetailsDialog(self._owner, snap.name, disks)
             if dialog.exec() != QDialog.DialogCode.Accepted:
                 return
             new_name = dialog.name.text().strip()
@@ -573,31 +621,31 @@ class MainWindow(QMainWindow):
             run_task(
                 lambda: svc_clone_advanced(snap.uuid, new_name, plan, preserve),
                 done=lambda _: self.worker.poke(),
-                failed=lambda m: ErrorDialog(self, "Clone failed", m).exec(),
+                failed=lambda m: ErrorDialog(self._owner, "Clone failed", m).exec(),
             )
 
         run_task(
             lambda: svc_list_domain_disks(snap.uuid),
             done=show,
-            failed=lambda m: ErrorDialog(self, "libvirt error", m).exec(),
+            failed=lambda m: ErrorDialog(self._owner, "libvirt error", m).exec(),
         )
 
     def _delete(self, snap: DomainSnapshot) -> None:
         def show(disks) -> None:
-            dialog = DeleteVmDialog(self, snap.name, disks)
+            dialog = DeleteVmDialog(self._owner, snap.name, disks)
             if dialog.exec() != QDialog.DialogCode.Accepted:
                 return
             paths = dialog.paths_to_delete()
             run_task(
                 lambda: svc_delete(snap.uuid, paths),
                 done=lambda _: self.worker.poke(),
-                failed=lambda m: ErrorDialog(self, "Delete failed", m).exec(),
+                failed=lambda m: ErrorDialog(self._owner, "Delete failed", m).exec(),
             )
 
         run_task(
             lambda: svc_list_domain_disks(snap.uuid),
             done=show,
-            failed=lambda m: ErrorDialog(self, "libvirt error", m).exec(),
+            failed=lambda m: ErrorDialog(self._owner, "libvirt error", m).exec(),
         )
 
     def _bulk_action(self, uuids: list, op: str) -> None:
@@ -624,7 +672,7 @@ class MainWindow(QMainWindow):
             from PySide6.QtWidgets import QInputDialog
 
             text, ok = QInputDialog.getText(
-                self, "Tag machines",
+                self._owner, "Tag machines",
                 f"Tags for {len(uuids)} machines (comma-separated, replaces existing):",
             )
             if not ok:
@@ -642,7 +690,7 @@ class MainWindow(QMainWindow):
         from PySide6.QtWidgets import QInputDialog
 
         text, ok = QInputDialog.getText(
-            self, "Tags", f"Tags for {snap.name} (comma-separated):",
+            self._owner, "Tags", f"Tags for {snap.name} (comma-separated):",
             text=", ".join(snap.tags),
         )
         if not ok:
@@ -651,7 +699,7 @@ class MainWindow(QMainWindow):
         run_task(
             lambda: svc_set_tags(snap.uuid, tags),
             done=lambda _: self.worker.poke(),
-            failed=lambda m: ErrorDialog(self, "Tagging failed", m).exec(),
+            failed=lambda m: ErrorDialog(self._owner, "Tagging failed", m).exec(),
         )
 
     def _switch_mode_direct(self, uuid: str, name: str) -> None:
@@ -689,7 +737,7 @@ class MainWindow(QMainWindow):
             body += "\n\n" + "\n\n".join(state.concerns())
 
         confirm = ConfirmDialog(
-            self, f"Switch {snap.name} to '{name}'", body, "Switch",
+            self._owner, f"Switch {snap.name} to '{name}'", body, "Switch",
         )
         if confirm.exec() != QDialog.DialogCode.Accepted:
             return
@@ -705,7 +753,7 @@ class MainWindow(QMainWindow):
         run_task(
             lambda: svc_switch_mode(uuid, name),
             done=done,
-            failed=lambda m: ErrorDialog(self, "Could not switch", m).exec(),
+            failed=lambda m: ErrorDialog(self._owner, "Could not switch", m).exec(),
         )
 
     def _check_marker_after(self, uuid: str, name: str) -> None:
@@ -722,7 +770,7 @@ class MainWindow(QMainWindow):
             return  # no marker, or it already says the right thing
 
         confirm = ConfirmDialog(
-            self, f"{name}: the marker was not updated",
+            self._owner, f"{name}: the marker was not updated",
             f"The definition is now '{name}', but {state.path} still says "
             f"'{state.holds or 'something else'}'. Anything reading that file - "
             "a libvirt hook, usually - will act on the old mode.\n\n"
@@ -735,7 +783,7 @@ class MainWindow(QMainWindow):
             lambda: svc_write_marker_elevated(state.path, name),
             done=lambda msg: self.machines.subtitle.setText(msg),
             failed=lambda m: ErrorDialog(
-                self, "Could not write the marker", m).exec(),
+                self._owner, "Could not write the marker", m).exec(),
         )
 
     def _load_detail_modes(self) -> None:
@@ -761,7 +809,7 @@ class MainWindow(QMainWindow):
         uuid = snap.uuid
 
         def show(modes) -> None:
-            dialog = ModesDialog(self, snap.name, modes, snap.state != "shutoff")
+            dialog = ModesDialog(self._owner, snap.name, modes, snap.state != "shutoff")
 
             def refresh(message: str) -> None:
                 self.machines.subtitle.setText(message)
@@ -777,23 +825,23 @@ class MainWindow(QMainWindow):
                 run_task(
                     lambda: svc_save_mode(uuid, name, note, marker),
                     done=refresh,
-                    failed=lambda m: ErrorDialog(self, "Could not save", m).exec(),
+                    failed=lambda m: ErrorDialog(self._owner, "Could not save", m).exec(),
                 )
 
             def drop(name: str) -> None:
                 run_task(
                     lambda: svc_delete_mode(uuid, name),
                     done=refresh,
-                    failed=lambda m: ErrorDialog(self, "Could not delete", m).exec(),
+                    failed=lambda m: ErrorDialog(self._owner, "Could not delete", m).exec(),
                 )
 
             def diff(name: str) -> None:
                 run_task(
                     lambda: svc_mode_diff(uuid, name),
                     done=lambda text: DiffDialog(
-                        self, f"{snap.name}: current vs '{name}'", text
+                        self._owner, f"{snap.name}: current vs '{name}'", text
                     ).exec(),
-                    failed=lambda m: ErrorDialog(self, "Could not compare", m).exec(),
+                    failed=lambda m: ErrorDialog(self._owner, "Could not compare", m).exec(),
                 )
 
             dialog.switch_requested.connect(switch)
@@ -805,7 +853,7 @@ class MainWindow(QMainWindow):
         run_task(
             lambda: svc_list_modes(uuid),
             done=show,
-            failed=lambda m: ErrorDialog(self, "libvirt error", m).exec(),
+            failed=lambda m: ErrorDialog(self._owner, "libvirt error", m).exec(),
         )
 
     def _flatten(self, snap: DomainSnapshot) -> None:
@@ -815,14 +863,14 @@ class MainWindow(QMainWindow):
         def ask(chain: dict) -> None:
             if not chain:
                 ErrorDialog(
-                    self, "Nothing to flatten",
+                    self._owner, "Nothing to flatten",
                     f"{snap.name} has no disk layered on another image, so it "
                     "already stands alone.",
                 ).exec()
                 return
             devs = sorted(chain)
             dialog = ChoiceDialog(
-                self, "Flatten a disk", "disk", devs,
+                self._owner, "Flatten a disk", "disk", devs,
                 note="Copies the shared base image into this machine's own "
                      "overlay. Afterwards the template can be deleted, at the "
                      "cost of the space the sharing was saving. The machine "
@@ -836,24 +884,24 @@ class MainWindow(QMainWindow):
                 lambda: svc_flatten_disk(uuid, dev),
                 done=lambda msg: (self.machines.subtitle.setText(msg),
                                   self.worker.poke()),
-                failed=lambda m: ErrorDialog(self, "Flatten failed", m).exec(),
+                failed=lambda m: ErrorDialog(self._owner, "Flatten failed", m).exec(),
             )
 
         run_task(
             lambda: svc_backing_chain(uuid),
             done=ask,
-            failed=lambda m: ErrorDialog(self, "libvirt error", m).exec(),
+            failed=lambda m: ErrorDialog(self._owner, "libvirt error", m).exec(),
         )
 
     def _edit_os_icon(self, snap: DomainSnapshot) -> None:
-        dialog = OsIconDialog(self, snap.name, snap.os_key, snap.os_icon_override)
+        dialog = OsIconDialog(self._owner, snap.name, snap.os_key, snap.os_icon_override)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         key = dialog.chosen_key()
         run_task(
             lambda: svc_set_os_icon(snap.uuid, key),
             done=lambda _: self.worker.poke(),
-            failed=lambda m: ErrorDialog(self, "Couldn't set the icon", m).exec(),
+            failed=lambda m: ErrorDialog(self._owner, "Couldn't set the icon", m).exec(),
         )
 
     def _fetch_os_logos(self) -> None:
@@ -893,11 +941,11 @@ class MainWindow(QMainWindow):
         run_task(
             lambda: svc_set_template(snap.uuid, on),
             done=lambda _: self.worker.poke(),
-            failed=lambda m: ErrorDialog(self, "Template change failed", m).exec(),
+            failed=lambda m: ErrorDialog(self._owner, "Template change failed", m).exec(),
         )
 
     def _linked_clone(self, snap: DomainSnapshot) -> None:
-        dialog = CloneDialog(self, snap.name)
+        dialog = CloneDialog(self._owner, snap.name)
         dialog.setWindowTitle("Linked clone")
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
@@ -905,14 +953,14 @@ class MainWindow(QMainWindow):
         run_task(
             lambda: svc_linked_clone(snap.uuid, new_name),
             done=lambda _: self.worker.poke(),
-            failed=lambda m: ErrorDialog(self, "Linked clone failed", m).exec(),
+            failed=lambda m: ErrorDialog(self._owner, "Linked clone failed", m).exec(),
         )
 
     # -- scheduled snapshots
 
     def _edit_schedule(self, snap: DomainSnapshot) -> None:
         current = self.stats.schedule_for(snap.uuid)
-        dialog = ScheduleDialog(self, snap.name, current)
+        dialog = ScheduleDialog(self._owner, snap.name, current)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         if dialog.enabled.isChecked():
@@ -983,7 +1031,7 @@ class MainWindow(QMainWindow):
 
     def _edit_wake_schedule(self, snap: DomainSnapshot) -> None:
         dialog = WakeScheduleDialog(
-            self, snap.name, self.stats.wake_schedule_for(snap.uuid)
+            self._owner, snap.name, self.stats.wake_schedule_for(snap.uuid)
         )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
@@ -1008,28 +1056,28 @@ class MainWindow(QMainWindow):
                 run_task(
                     lambda: svc_set_on_crash(snap.uuid, enable),
                     done=lambda _: self.worker.poke(),
-                    failed=lambda m: ErrorDialog(self, "Change failed", m).exec(),
+                    failed=lambda m: ErrorDialog(self._owner, "Change failed", m).exec(),
                 )
 
         run_task(
             lambda: svc_get_on_crash(snap.uuid),
             done=show,
-            failed=lambda m: ErrorDialog(self, "libvirt error", m).exec(),
+            failed=lambda m: ErrorDialog(self._owner, "libvirt error", m).exec(),
         )
 
     def _export_vm(self, snap: DomainSnapshot) -> None:
-        dest = QFileDialog.getExistingDirectory(self, "Export into folder")
+        dest = QFileDialog.getExistingDirectory(self._owner, "Export into folder")
         if not dest:
             return
         self.machines.subtitle.setText(f"exporting {snap.name}…")
         run_task(
             lambda: svc_export_vm(snap.uuid, dest),
             done=lambda folder: self.machines.subtitle.setText(f"exported to {folder}"),
-            failed=lambda m: ErrorDialog(self, "Export failed", m).exec(),
+            failed=lambda m: ErrorDialog(self._owner, "Export failed", m).exec(),
         )
 
     def _import_backup(self) -> None:
-        folder = QFileDialog.getExistingDirectory(self, "Choose backup folder")
+        folder = QFileDialog.getExistingDirectory(self._owner, "Choose backup folder")
         if not folder:
             return
         self.machines.subtitle.setText("importing backup…")
@@ -1039,7 +1087,7 @@ class MainWindow(QMainWindow):
                 self.machines.subtitle.setText(f"imported {name}"),
                 self.worker.poke(),
             ),
-            failed=lambda m: ErrorDialog(self, "Import failed", m).exec(),
+            failed=lambda m: ErrorDialog(self._owner, "Import failed", m).exec(),
         )
 
     # -- command palette
@@ -1069,7 +1117,7 @@ class MainWindow(QMainWindow):
         for page in Sidebar.NAV:
             entries.append((f"go to  ·  {page}", lambda p=page: self._navigate(p)))
         entries.append(("new machine…", self._new_vm))
-        CommandPalette(self, entries).exec()
+        CommandPalette(self._owner, entries).exec()
 
     def _open_console(self, uuid: str) -> None:
         self._open_detail(uuid)
@@ -1081,7 +1129,7 @@ class MainWindow(QMainWindow):
         def show_dialog(result) -> None:
             networks, pools = result
             dialog = NewVmDialog(
-                self,
+                self._owner,
                 networks,
                 pools,
                 host_cpus=host.cpus if host else 16,
@@ -1097,13 +1145,13 @@ class MainWindow(QMainWindow):
                 run_task(
                     lambda: svc_linked_clone(template, spec.name, spec.network),
                     done=lambda _: self.worker.poke(),
-                    failed=lambda m: ErrorDialog(self, "Clone failed", m).exec(),
+                    failed=lambda m: ErrorDialog(self._owner, "Clone failed", m).exec(),
                 )
                 return
             run_task(
                 lambda: svc_create_vm(spec),
                 done=lambda _: self.worker.poke(),
-                failed=lambda m: ErrorDialog(self, "Create failed", m).exec(),
+                failed=lambda m: ErrorDialog(self._owner, "Create failed", m).exec(),
             )
 
         def gather():
@@ -1114,7 +1162,7 @@ class MainWindow(QMainWindow):
         run_task(
             gather,
             done=show_dialog,
-            failed=lambda m: ErrorDialog(self, "libvirt error", m).exec(),
+            failed=lambda m: ErrorDialog(self._owner, "libvirt error", m).exec(),
         )
 
     def closeEvent(self, event) -> None:

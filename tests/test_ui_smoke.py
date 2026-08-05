@@ -22,6 +22,7 @@ import vmmanager.dialogs as dialogs
 PROJECT = Path(__file__).resolve().parent.parent
 from vmmanager.core.models import (
     DiskInfo,
+    DisplayHealth,
     DomainDisk,
     DomainSnapshot,
     Hardware,
@@ -67,6 +68,8 @@ ARGS = {
     "CpuDialog": (HARDWARE, 16),
     "DeleteVmDialog": ("web-01", [DISK]),
     "DiskCacheDialog": ("vda", "none"),
+    "DisplayFixDialog": ("win11", DisplayHealth(
+        graphics=("spice",), video_model="vga", running=True)),
     "ErrorDialog": ("libvirt error", "something went wrong"),
     "GuestFeaturesDialog": "needs host capabilities, built in its own test below",
     "HostDeviceDialog": ([HostDevice(kind="usb", ident="1234:5678", label="A stick")],),
@@ -91,6 +94,8 @@ ARGS = {
     "SnapshotDialog": ("web-01",),
     "TuningDialog": "needs the host topology, built in its own test below",
     "VideoDialog": ("virtio",),
+    "VirtioIsoDialog": ("/usr/share/virtio-win/virtio-win.iso",
+                        ["/var/lib/libvirt/images/virtio-win.iso"], [POOL]),
     "VncPasswordDialog": (),
     "VolumeDialog": (["default"],),
     "VolumePickerDialog": ([POOL],),

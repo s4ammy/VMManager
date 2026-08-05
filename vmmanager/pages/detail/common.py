@@ -40,6 +40,7 @@ from ...dialogs import (
     ConfirmDialog,
     CpuDialog,
     DiskCacheDialog,
+    DisplayFixDialog,
     ErrorDialog,
     HostDeviceDialog,
     MemoryDialog,
@@ -49,6 +50,7 @@ from ...dialogs import (
     TuningDialog,
     SnapshotDialog,
     VideoDialog,
+    VirtioIsoDialog,
     VncPasswordDialog,
     VolumePickerDialog,
     WindowsToolingDialog,
@@ -93,6 +95,7 @@ from ...libvirt_service import (
     svc_get_device_xml,
     svc_get_hardware,
     svc_get_xml,
+    svc_display_health,
     svc_graphics_info,
     svc_guest_exec,
     svc_guest_info,
@@ -252,7 +255,14 @@ class DetachedConsoleWindow(QWidget):
 
     def __init__(self, client: QWidget, title: str) -> None:
         super().__init__()
-        self.setWindowTitle(f"{title} - console (F11 fullscreen)")
+        # The hint line stays behind on the tab, so the one thing someone needs
+        # to know while the keyboard is grabbed goes in the title instead.
+        from ...console.grab import release_combo_name
+
+        self.setWindowTitle(
+            f"{title} - console (F11 fullscreen · {release_combo_name()} "
+            "releases the keyboard)"
+        )
         self.setObjectName("ConsoleWindow")
         box = QVBoxLayout(self)
         box.setContentsMargins(0, 0, 0, 0)

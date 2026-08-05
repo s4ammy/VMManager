@@ -34,6 +34,40 @@ VIRTIO_WIN = CatalogImage(
 )
 
 
+# Where a copy of the disc tends to be already. The distro package (Fedora's
+# virtio-win, Arch's AUR build) drops it in /usr/share; libvirt's default pool is
+# where one imported through vmmanager lands; the rest is where a hand-downloaded
+# one usually sits. Searched in this order, so a packaged disc is offered ahead
+# of whatever is in Downloads. A trailing * is expanded, newest name last.
+VIRTIO_WIN_PLACES = (
+    "/usr/share/virtio-win/virtio-win.iso",
+    "/usr/share/virtio-win/virtio-win-*.iso",
+    "/var/lib/libvirt/images/virtio-win*.iso",
+    "~/.cache/vmmanager/images/virtio-win.iso",
+    "~/Downloads/virtio-win*.iso",
+    "~/Downloads/virtio-win/virtio-win*.iso",
+)
+
+
+def virtio_win_candidates() -> list[str]:
+    """Copies of the virtio-win disc already on this host, best first.
+
+    Only worth offering for a local connection - these are paths on the machine
+    vmmanager runs on, and a remote libvirt would be looking on its own disk.
+    """
+    found: list[str] = []
+    for place in VIRTIO_WIN_PLACES:
+        pattern = Path(place).expanduser()
+        if "*" in place:
+            matches = sorted(pattern.parent.glob(pattern.name), reverse=True)
+        else:
+            matches = [pattern]
+        for match in matches:
+            if match.is_file() and str(match) not in found:
+                found.append(str(match))
+    return found
+
+
 CATALOG: tuple[CatalogImage, ...] = (
     CatalogImage(
         "Debian 13 (trixie)", "debian13",

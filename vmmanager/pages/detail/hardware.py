@@ -703,6 +703,7 @@ class HardwareMixin:
         uuid = self.uuid
         menu = QMenu(self)
         menu.addAction("Disk…", self._add_disk)
+        menu.addAction("virtio-win driver disc (Windows)…", self._add_virtio_iso)
         menu.addAction("Network interface…", self._add_nic)
         menu.addAction("Shared folder…", self._add_share)
         menu.addAction("Host device (USB / PCI)…", self._add_hostdev)
@@ -812,7 +813,9 @@ class HardwareMixin:
             if dialog.exec() != QDialog.DialogCode.Accepted or not dialog.action:
                 return
             if dialog.action == "iso":
-                self._get_virtio_win(uuid)
+                # Through the picker, not straight to the download: the disc is
+                # usually already on the host.
+                self._add_virtio_iso()
             else:
                 fn = {
                     "agent": lambda: svc_add_agent_channel(uuid),
@@ -832,32 +835,93 @@ class HardwareMixin:
             lambda: svc_windows_tooling_state(uuid), done=show, failed=self._show_error
         )
 
+    def _add_virtio_iso(self) -> None:
+        """Attach the virtio-win driver disc from wherever this host keeps it.
+
+        Windows cannot see a virtio disk or NIC until the drivers off this disc
+        are installed, so an install onto virtio storage stalls at "no drives
+        found" without it. Most people already have a copy - a distro package,
+        or one downloaded for the last machine - and it is 700 MB to fetch
+        again, so the dialog looks for one, remembers what it is told, and keeps
+        the download as the fallback rather than the first move.
+        """
+        uuid = self.uuid
+        if not uuid:
+            return
+        from ...data.catalog import virtio_win_candidates
+        from ...pages.settings import save_virtio_win_iso, virtio_win_iso
+
+        remote = is_remote_uri(current_uri())
+        saved = virtio_win_iso()
+
+        def show(pools) -> None:
+            if self.uuid != uuid:
+                return
+            dialog = VirtioIsoDialog(
+                self,
+                saved=saved,
+                found=[] if remote else virtio_win_candidates(),
+                pools=pools,
+                remote=remote,
+            )
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return
+            if dialog.download:
+                self._get_virtio_win(uuid)
+                return
+            path = dialog.chosen_path()
+            if not path:
+                return
+            if dialog.remember.isChecked():
+                save_virtio_win_iso(path)
+            elif saved == path:
+                # Unticked on the disc that was being offered: stop offering it.
+                save_virtio_win_iso("")
+            self.hw_status.setText("attaching the virtio-win disc…")
+            run_task(
+                lambda: svc_attach_cdrom(uuid, path),
+                done=self._hw_done,
+                failed=self._hw_failed,
+            )
+
+        run_task(svc_list_pools, done=show, failed=self._hw_failed)
+
+    def _virtio_status(self, text: str) -> None:
+        """Say it on both tabs: the disc can be asked for from either of them."""
+        self.send_status.setText(text)
+        self.hw_status.setText(text)
+
     def _get_virtio_win(self, uuid: str) -> None:
         """Download the virtio-win disc, import it, attach it as a drive."""
         from ...data.catalog import VIRTIO_WIN, ImageDownloader
 
-        self.send_status.setText("downloading virtio-win…")
+        self._virtio_status("downloading virtio-win…")
         downloader = ImageDownloader(VIRTIO_WIN)
         self._virtio_downloader = downloader
         downloader.progress.connect(
-            lambda _pct, text: self.send_status.setText(f"virtio-win: {text}")
+            lambda _pct, text: self._virtio_status(f"virtio-win: {text}")
         )
         downloader.failed.connect(
-            lambda m: self.send_status.setText(f"virtio-win download failed: {m}")
+            lambda m: self._virtio_status(f"virtio-win download failed: {m}")
         )
 
         def imported(path: str) -> None:
+            from ...pages.settings import save_virtio_win_iso
+
+            # Downloaded once, offered from here on: the next machine gets the
+            # copy now sitting in the pool instead of another 700 MB.
+            save_virtio_win_iso(path)
             run_task(
                 lambda: svc_attach_cdrom(uuid, path),
                 done=lambda msg: (
-                    self.send_status.setText(f"virtio-win attached - {msg}"),
+                    self._virtio_status(f"virtio-win attached - {msg}"),
                     self._load_hardware(),
                 ),
                 failed=lambda m: ErrorDialog(self, "Couldn't attach disc", m).exec(),
             )
 
         def downloaded(local: str) -> None:
-            self.send_status.setText("importing the disc into the default pool…")
+            self._virtio_status("importing the disc into the default pool…")
             run_task(
                 lambda: svc_upload_volume_from_file(
                     "default", "virtio-win.iso", local, "raw"
