@@ -95,6 +95,22 @@ def save_console_resize_guest(on: bool) -> None:
     QSettings(*_SETTINGS).setValue("console_resize_guest", "true" if on else "false")
 
 
+def console_tls() -> bool:
+    """Prefer TLS (VeNCrypt / SPICE TLS channels) when the server offers it."""
+    return QSettings(*_SETTINGS).value("console_tls", "false") in ("true", True)
+
+
+def console_tls_ca() -> str:
+    """CA certificate consoles are verified against; "" uses the system set."""
+    return str(QSettings(*_SETTINGS).value("console_tls_ca", "") or "")
+
+
+def console_tls_no_verify() -> bool:
+    """Skip certificate verification - encryption without identity."""
+    return QSettings(*_SETTINGS).value(
+        "console_tls_no_verify", "false") in ("true", True)
+
+
 def console_autoconnect() -> bool:
     return QSettings(*_SETTINGS).value("console_autoconnect", "true") in ("true", True)
 
@@ -361,6 +377,45 @@ class SettingsPage(QWidget):
                 "console_autoconnect", "true" if on else "false")
         )
         content.addWidget(self.autoconnect)
+        self.tls = QCheckBox(
+            "Encrypt console connections when the server offers TLS "
+            "(VeNCrypt for VNC, TLS channels for SPICE)"
+        )
+        self.tls.setToolTip(
+            "The server side is qemu's vnc_tls / spice TLS setup. A server "
+            "that only offers TLS is encrypted regardless of this setting."
+        )
+        self.tls.setChecked(console_tls())
+        self.tls.toggled.connect(
+            lambda on: self._settings.setValue(
+                "console_tls", "true" if on else "false")
+        )
+        content.addWidget(self.tls)
+        tls_row = QHBoxLayout()
+        tls_row.setSpacing(10)
+        tls_ca_label = QLabel("CA certificate")
+        tls_ca_label.setProperty("class", "StatVal")
+        self.tls_ca = QLineEdit(console_tls_ca())
+        self.tls_ca.setPlaceholderText(
+            "/etc/pki/CA/cacert.pem - empty uses the system store"
+        )
+        self.tls_ca.editingFinished.connect(
+            lambda: self._settings.setValue(
+                "console_tls_ca", self.tls_ca.text().strip())
+        )
+        tls_row.addWidget(tls_ca_label)
+        tls_row.addWidget(self.tls_ca, 1)
+        content.addLayout(tls_row)
+        self.tls_no_verify = QCheckBox(
+            "Skip certificate verification (encrypted, but the server is "
+            "not identified - self-signed setups)"
+        )
+        self.tls_no_verify.setChecked(console_tls_no_verify())
+        self.tls_no_verify.toggled.connect(
+            lambda on: self._settings.setValue(
+                "console_tls_no_verify", "true" if on else "false")
+        )
+        content.addWidget(self.tls_no_verify)
         content.addSpacing(12)
 
         stats_title = QLabel("Statistics collected")

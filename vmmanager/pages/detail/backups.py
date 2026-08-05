@@ -31,6 +31,7 @@ class BackupsMixin:
         incr.clicked.connect(lambda: self._run_backup(True))
         row.addWidget(full)
         row.addWidget(incr)
+        row.addWidget(_ghost("Restore backup…", self._restore_backup))
         row.addWidget(_ghost("Delete selected point", self._delete_checkpoint))
         row.addWidget(_ghost("Refresh", self._load_checkpoints))
         row.addStretch(1)
@@ -96,6 +97,26 @@ class BackupsMixin:
             failed=lambda m: (
                 self.backup_status.setText(""),
                 ErrorDialog(self, "Backup failed", m).exec(),
+            ),
+        )
+
+    def _restore_backup(self) -> None:
+        folder = QFileDialog.getExistingDirectory(
+            self, "Choose any backup in the chain"
+        )
+        if not folder:
+            return
+        self.backup_status.setText(
+            "rebuilding the chain into a new machine…"
+        )
+        run_task(
+            lambda: svc_restore_backup(folder, "default"),
+            done=lambda name: self.backup_status.setText(
+                f"restored as '{name}' - it is in the machine list"
+            ),
+            failed=lambda m: (
+                self.backup_status.setText(""),
+                ErrorDialog(self, "Restore failed", m).exec(),
             ),
         )
 

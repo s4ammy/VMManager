@@ -852,3 +852,65 @@ class ModesDialog(SizedDialog):
             self.save_requested.emit(
                 name, self.new_note.text().strip(), self.marker.text().strip()
             )
+
+
+class UsbRulesDialog(SizedDialog):
+    """Which host USB devices follow this machine automatically.
+
+    A ticked device is attached whenever it is plugged in while the
+    machine runs. Devices with a rule but not plugged in right now are
+    listed too, so a rule can be removed without the device present.
+    """
+
+    def __init__(self, parent, vm_name: str, devices, rules: list[str]) -> None:
+        # devices: list[HostDevice] (kind == "usb"), rules: idents
+        super().__init__(parent)
+        from PySide6.QtWidgets import QListWidgetItem
+
+        self.setWindowTitle("Auto-attach USB")
+        self.setMinimumSize(520, 420)
+        box = QVBoxLayout(self)
+        box.setContentsMargins(24, 22, 24, 20)
+        box.setSpacing(10)
+        box.addWidget(_title(f"Auto-attach USB to {vm_name}"))
+        note = QLabel(
+            "A ticked device is handed to this machine whenever it appears "
+            "on the host while the machine is running - plug it in and it "
+            "shows up inside. A device already inside another machine is "
+            "left alone."
+        )
+        note.setWordWrap(True)
+        note.setProperty("class", "Dim")
+        box.addWidget(note)
+
+        self.device_list = QListWidget()
+        seen = set()
+        for dev in devices:
+            item = QListWidgetItem(f"{dev.label}  ({dev.ident})")
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(
+                Qt.CheckState.Checked if dev.ident in rules
+                else Qt.CheckState.Unchecked
+            )
+            item.setData(Qt.ItemDataRole.UserRole, dev.ident)
+            self.device_list.addItem(item)
+            seen.add(dev.ident)
+        for ident in rules:
+            if ident in seen:
+                continue
+            item = QListWidgetItem(f"(not plugged in now)  ({ident})")
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Checked)
+            item.setData(Qt.ItemDataRole.UserRole, ident)
+            self.device_list.addItem(item)
+        box.addWidget(self.device_list, 1)
+        box.addSpacing(6)
+        box.addLayout(_buttons(self, "Save rules"))
+
+    def chosen(self) -> list[str]:
+        out = []
+        for i in range(self.device_list.count()):
+            item = self.device_list.item(i)
+            if item.checkState() == Qt.CheckState.Checked:
+                out.append(item.data(Qt.ItemDataRole.UserRole))
+        return out

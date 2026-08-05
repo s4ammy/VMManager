@@ -89,7 +89,9 @@ class NewVmDialog(SizedDialog):
         box.addWidget(_field_label("install from"))
         self.src_iso = QRadioButton("Install ISO")
         self.src_url = QRadioButton("Network install tree (URL)")
-        self.src_import = QRadioButton("Existing disk image (cloud image, qcow2, raw)")
+        self.src_import = QRadioButton(
+            "Existing disk image (qcow2, raw, or VMware/VirtualBox/Hyper-V)"
+        )
         self.src_empty = QRadioButton("Empty disk - boot from network or attach media later")
         self.src_template = QRadioButton(
             "A template - instant copy-on-write clone, shares the base image"
@@ -180,6 +182,11 @@ class NewVmDialog(SizedDialog):
             imp_box.addWidget(browse_img)
         self._import_row.hide()
         box.addWidget(self._import_row)
+        self.import_hint = QLabel("")
+        self.import_hint.setObjectName("ConsoleHint")
+        self.import_hint.setWordWrap(True)
+        self.import_hint.hide()
+        box.addWidget(self.import_hint)
 
         res_row = QHBoxLayout()
         res_row.setSpacing(14)
@@ -376,6 +383,9 @@ class NewVmDialog(SizedDialog):
         self._iso_row.setVisible(self.src_iso.isChecked())
         self._url_row.setVisible(self.src_url.isChecked())
         self._import_row.setVisible(self.src_import.isChecked())
+        self.import_hint.setVisible(
+            self.src_import.isChecked() and bool(self.import_hint.text())
+        )
         self._template_row.setVisible(from_template)
         self._disk_row.setVisible(
             not self.src_import.isChecked() and not from_template
@@ -415,10 +425,49 @@ class NewVmDialog(SizedDialog):
     def _pick_image(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
             self, "Choose disk image", os.path.expanduser("~"),
-            "Disk images (*.qcow2 *.img *.raw);;All files (*)",
+            "Disk images (*.qcow2 *.img *.raw);;"
+            "Other hypervisors (*.vmdk *.vhdx *.vhd *.vdi *.ova *.ovf);;"
+            "All files (*)",
         )
-        if path:
-            self.import_path.setText(path)
+        if not path:
+            return
+        self.import_path.setText(path)
+        self._describe_foreign(path)
+
+    def _describe_foreign(self, path: str) -> None:
+        """An OVA/OVF pick fills in what the appliance asked for."""
+        from .libvirt_service import describe_source, is_foreign_source
+
+        if not is_foreign_source(path):
+            self.import_hint.setText("")
+            self.import_hint.hide()
+            return
+        self.import_hint.setText("converted to qcow2 in the pool on create")
+        self.import_hint.show()
+
+        def apply(info) -> None:
+            if info is None:
+                return
+            if info.name and not self.name.text().strip():
+                self.name.setText(info.name)
+            if info.vcpus:
+                self.vcpus.setValue(info.vcpus)
+            if info.memory_mb:
+                self.memory.setValue(info.memory_mb)
+            extra = ""
+            if len(info.disk_files) > 1:
+                extra = (f" · only the first of its {len(info.disk_files)} "
+                         "disks is imported")
+            self.import_hint.setText(
+                "appliance defaults applied - converted to qcow2 on create"
+                + extra
+            )
+
+        run_task(
+            lambda: describe_source(path),
+            done=apply,
+            failed=lambda m: self.import_hint.setText(f"unreadable: {m}"),
+        )
 
     def _pick_volume(self, line_edit: QLineEdit) -> None:
         picker = VolumePickerDialog(self, self._pools)

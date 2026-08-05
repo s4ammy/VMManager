@@ -133,6 +133,11 @@ class NetworksPage(QWidget):
         self.map_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.map_btn.clicked.connect(self._toggle_map)
         head.addWidget(self.map_btn, alignment=Qt.AlignmentFlag.AlignTop)
+        filters_btn = QPushButton("Filters…")
+        filters_btn.setProperty("class", "GhostButton")
+        filters_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        filters_btn.clicked.connect(self._open_filters)
+        head.addWidget(filters_btn, alignment=Qt.AlignmentFlag.AlignTop)
         new_btn = QPushButton("+ New network")
         new_btn.setProperty("class", "PrimaryButton")
         new_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -201,6 +206,11 @@ class NetworksPage(QWidget):
             done=lambda _: self.refresh(),
             failed=lambda m: ErrorDialog(self, "Network action failed", m).exec(),
         )
+
+    def _open_filters(self) -> None:
+        from ..dialogs import NwFiltersDialog
+
+        NwFiltersDialog(self).exec()
 
     def _new_network(self) -> None:
         from ..core.networks import svc_create_network_ex

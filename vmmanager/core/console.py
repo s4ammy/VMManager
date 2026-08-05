@@ -56,6 +56,7 @@ def svc_graphics_info(uuid: str) -> list[GraphicsInfo]:
                     port=int(g.get("port") or -1),
                     socket=socket,
                     has_password=bool(g.get("passwd")),
+                    tls_port=int(g.get("tlsPort") or -1),
                 )
             )
         return out

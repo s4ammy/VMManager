@@ -45,7 +45,8 @@ changed, and restore it if you want it back.
   mode and switch between them safely.
 - **Tuning that knows your host.** CPU pinning against the real core and thread
   layout read from libvirt, with the emulator parked out of the way.
-- **Incremental backups** on libvirt checkpoints, copying only changed blocks.
+- **Incremental backups** on libvirt checkpoints, copying only changed
+  blocks - and restore of a whole chain back into a bootable machine.
 - **Config history.** Every definition change kept, shown as a diff, restorable.
 - **A window per machine**, so you can work on several at once.
 - **Themes.** Colours, corner radii and fonts in a file you can edit in the app.
@@ -53,8 +54,11 @@ changed, and restore it if you want it back.
   enlightenments, KVM hiding, Looking Glass, evdev passthrough, secure boot.
 - **Passthrough diagnostics** that say why a device will or will not work.
 
-Plus a command palette, scheduled snapshots, power schedules, a topology map, an
-SSH terminal, guest health warnings, and a disk reclaimer.
+Plus a command palette, scheduled snapshots and power schedules (with a
+background service so they fire while the app is closed), live disk moves
+between pools, imports from VMware/VirtualBox/Hyper-V, network filters,
+vGPU/mediated devices, auto-attach USB rules, TLS consoles, a topology map,
+an SSH terminal, guest health warnings, and a disk reclaimer.
 [The full list](FEATURES.md).
 
 ## Requirements
@@ -64,7 +68,7 @@ the interface. [Details](INSTALL.md#what-it-needs).
 
 ## Contributing
 
-`.venv/bin/python -m pytest -q` runs 514 tests in about 8 seconds against
+`.venv/bin/python -m pytest -q` runs 654 tests in about 10 seconds against
 libvirt's fake hypervisor - no real machines involved, no display needed.
 **[DEVELOPING.md](DEVELOPING.md)** covers how the code is arranged, what the
 tests are for, and the rules they enforce.

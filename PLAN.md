@@ -623,9 +623,85 @@ Marker files for hooks are supported but usually live under /etc, which this
 process cannot write. It reports that and prints the command instead of
 claiming success and leaving the hook on the old mode.
 
+## Milestone 19 - ten features (shipped)
+
+Backup restore, a scheduler daemon, nwfilter, SR-IOV/mdev, TLS consoles,
+live disk moves, cross-hypervisor import, drag-and-drop to guest, XML diff
+previews, and auto-attach USB. Verified against the fake driver plus pure
+logic tests (654 total); the notes below say where real-hardware behaviour
+is still taken from the specification rather than measured.
+
+- **Incremental backup restore** (`storage.py`): the manifest chain is walked
+  from any folder back to its full run, incremental layers are copied and
+  rebased onto the layer below with `qemu-img rebase -u` (originals never
+  written), flattened with `qemu-img convert`, streamed into a pool and
+  defined. Name collisions become `-restored`, which also drops MACs so the
+  copy can run beside the original. The chain walk and the rebase plan are
+  pure functions with tests including loops, missing parents and chains that
+  never reach a full backup.
+- **Scheduler daemon** (`scheduler.py`): the snapshot and power-schedule
+  decisions were extracted from the window into shared pure functions
+  (`snapshots_due`, `wake_actions`), so `vmmanager --daemon` and the app
+  cannot drift. The daemon beats a heartbeat file each tick; the app skips
+  its own runs while the heartbeat is fresh (150 s), so nothing double-fires.
+  `packaging/vmmanager-scheduler.service` is a user unit; `/usr/bin/env`
+  does the PATH lookup so it works however vmmanager was installed.
+- **Network filters** (`core/nwfilter.py`): list/define/delete, a filters
+  dialog off the Networks page with the XML editable in place, and a
+  per-NIC filterref with the IP parameter in the NIC editor. The interface
+  update falls back to a full redefine on drivers that cannot update an
+  interface in place - which is also what the fake driver needs, so the
+  fallback is the tested path. `svc_nwfilter_names` maps VIR_ERR_NO_SUPPORT
+  to an empty list, so the session driver just doesn't offer filters.
+- **SR-IOV + mdev** (`core/mdev.py`): sysfs walkers take a root directory
+  and are tested against a fake /sys shaped like GVT-g publishes; mdev
+  create/delete goes through libvirt's node-device API (root does the sysfs
+  write, not us) and instances attach as `<hostdev type='mdev'>`, a new
+  kind threaded through ident/attach/detach/badges (MDV). The passthrough
+  dialog annotates PFs and VFs. Not measured on real hardware: no mdev-
+  capable GPU on this host.
+- **TLS consoles**: the VNC client's socket became a QSslSocket (plain until
+  asked), and VeNCrypt is a real state machine - version 0.2, subtype
+  choice preferring x509-none, `startClientEncryption` at the handoff, then
+  None or VNC auth inside the tunnel. Preference order is tested through a
+  QSslSocket subclass with fake I/O, so the isinstance gate and signal
+  wiring are real. SPICE sets tls-port/ca-file/secure-channels=all, and a
+  TLS-only display (no plain port) is negotiated encrypted regardless of
+  the setting. SSH-tunnelled consoles keep using the plain port - the
+  tunnel is the encryption. The TLS handshake itself is OpenSSL's; not
+  exercised against a live TLS-enabled qemu here.
+- **Live disk moves** (`svc_move_disk`): running machines mirror with
+  blockCopy (REUSE_EXT on a pre-created volume + TRANSIENT_JOB) and pivot;
+  stopped ones clone via `createXMLFrom`. The persistent definition is
+  repointed either way, and the source volume is deleted only when asked
+  and never while another domain's XML mentions it. The fake driver cannot
+  clone across pools, so what is tested is every refusal sentence; the copy
+  path follows virsh blockcopy semantics.
+- **Cross-hypervisor import** (`core/convert.py`): vmdk/vhdx/vhd/vdi
+  convert to qcow2 into the target pool on create (verified with a real
+  `qemu-img` round trip); OVF descriptors are parsed namespace-blind
+  (producers disagree), filling name/vcpus/memory into the wizard, and OVA
+  disks are unpacked selectively from the tar. Multi-disk appliances import
+  the boot disk and say so.
+- **Drag-and-drop to guest**: files dropped on the console stack go through
+  the existing guest-file-send, /tmp or C:\Users\Public by OS, queued
+  sequentially with progress in the hint line.
+- **XML diff preview**: `svc_definition_diff` canonicalises both sides the
+  way mode diffs already did; the XML tab's Save and every mode switch show
+  the coloured diff with the apply button on it. Off when confirmations are
+  off.
+- **Auto-attach USB**: rules in the stats database, a 10 s tick that costs
+  nothing when no rules exist, and a pure planner with the property that a
+  device already inside any guest - including one with no rule - is left
+  alone. First rule wins when two machines claim one device.
+
 ## Known limits
 
-- VNC auth is None or classic VNC password; VeNCrypt/TLS not yet. SPICE
-  connects plaintext/password (no TLS channels yet).
+- SPICE password auth is supported; SASL is not, for either protocol.
+- Anonymous-TLS VeNCrypt subtypes (tls-none/tls-vnc) need ciphers OpenSSL
+  disables by default, so x509 subtypes are what actually work.
 - Graphics devices can't hot-plug (libvirt limitation) - "Add VNC display"
   edits the config and needs a restart.
+- mdev instances are transient across host reboots; persisting them is
+  mdevctl's job. Setting an SR-IOV VF count is host configuration, not
+  something libvirt exposes.

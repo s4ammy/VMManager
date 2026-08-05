@@ -148,6 +148,21 @@ def test_diff_shows_what_changed(testconn, domain, store):
     assert diff.startswith("--- current")
 
 
+def test_definition_diff_previews_an_edit(testconn, domain):
+    """The XML tab shows this before saving: what the edit really changes."""
+    from vmmanager.libvirt_service import svc_definition_diff
+
+    import libvirt
+
+    uuid = domain.UUIDString()
+    current = domain.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE)
+    assert svc_definition_diff(uuid, current) == ""
+    proposed = current.replace("<vcpu", "<title>renamed</title><vcpu", 1)
+    diff = svc_definition_diff(uuid, proposed)
+    assert "+  <title>renamed</title>" in diff
+    assert diff.startswith("--- current")
+
+
 def test_a_marker_that_needs_root_says_so_rather_than_claiming_success():
     from vmmanager.core.modes import _write_marker
 

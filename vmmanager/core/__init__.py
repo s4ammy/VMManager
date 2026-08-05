@@ -12,9 +12,11 @@ from __future__ import annotations
 from .models import *  # noqa: F401,F403
 from .connection import *  # noqa: F401,F403
 from .xmlutil import *  # noqa: F401,F403
+from .convert import *  # noqa: F401,F403
 from .devices import *  # noqa: F401,F403
 from .guest import *  # noqa: F401,F403
 from .networks import *  # noqa: F401,F403
+from .nwfilter import *  # noqa: F401,F403
 from .snapshots import *  # noqa: F401,F403
 from .create import *  # noqa: F401,F403
 from .storage import *  # noqa: F401,F403
@@ -23,6 +25,7 @@ from .modes import *  # noqa: F401,F403
 from .tuning import *  # noqa: F401,F403
 from .console import *  # noqa: F401,F403
 from .hostdev import *  # noqa: F401,F403
+from .mdev import *  # noqa: F401,F403
 from .domains import *  # noqa: F401,F403
 from .inspect import *  # noqa: F401,F403
 from .osident import *  # noqa: F401,F403

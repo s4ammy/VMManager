@@ -25,6 +25,7 @@ from .dialogs import (
     ModesDialog,
     OsIconDialog,
     ScheduleDialog,
+    UsbRulesDialog,
     WakeScheduleDialog,
 )
 from .data.history import StatsStore
@@ -51,7 +52,12 @@ from .libvirt_service import (
     svc_migrate,
     svc_migrate_advanced,
     svc_prune_snapshots,
+    svc_attach_hostdev,
+    svc_list_host_devices,
+    svc_restore_backup,
     svc_restore_from_file,
+    svc_usb_watch_state,
+    usb_auto_attach_plan,
     svc_save_to_file,
     svc_set_on_crash,
     svc_backing_chain,
@@ -143,6 +149,7 @@ class MainWindow(QMainWindow):
             self._owned(self, self._restore_from_file)
         )
         self.machines.import_backup.connect(self._owned(self, self._import_backup))
+        self.machines.restore_backup.connect(self._owned(self, self._restore_backup))
         self.machines.bulk_action.connect(self._owned(self, self._bulk_action))
         self.machines.health_updated.connect(self._on_health_alert)
 
@@ -184,6 +191,12 @@ class MainWindow(QMainWindow):
         self._schedule_timer.timeout.connect(self._run_schedules)
         self._schedule_timer.timeout.connect(self._run_wake_schedules)
         self._schedule_timer.start()
+        # auto-attach USB rules: often enough to feel immediate on plug-in,
+        # and the tick costs nothing when no rules exist
+        self._usb_timer = QTimer(self)
+        self._usb_timer.setInterval(10_000)
+        self._usb_timer.timeout.connect(self._usb_tick)
+        self._usb_timer.start()
         self._setup_tray()
 
     def _setup_tray(self) -> None:
@@ -519,6 +532,7 @@ class MainWindow(QMainWindow):
         menu.addAction("Scheduled snapshots…", lambda: self._edit_schedule(snap))
         menu.addAction("Power schedule…", lambda: self._edit_wake_schedule(snap))
         menu.addAction("Auto-restart on crash…", lambda: self._edit_on_crash(snap))
+        menu.addAction("Auto-attach USB…", lambda: self._edit_usb_rules(snap))
         if not running:
             menu.addAction("Export backup…", lambda: self._export_vm(snap))
         menu.addAction("Migrate…", lambda: self._migrate(snap))
@@ -736,11 +750,30 @@ class MainWindow(QMainWindow):
         if state is not None and state.concerns():
             body += "\n\n" + "\n\n".join(state.concerns())
 
-        confirm = ConfirmDialog(
-            self._owner, f"Switch {snap.name} to '{name}'", body, "Switch",
+        # Show what the switch actually changes, not just that it changes
+        # something. If the diff cannot be read the plain confirmation stands.
+        def ask(diff: str | None) -> None:
+            if diff:
+                dialog = DiffDialog(
+                    self._owner, f"Switch {snap.name} to '{name}'",
+                    diff, confirm="Switch", note=body,
+                )
+                accepted = dialog.exec() == QDialog.DialogCode.Accepted
+            else:
+                accepted = ConfirmDialog(
+                    self._owner, f"Switch {snap.name} to '{name}'", body,
+                    "Switch",
+                ).exec() == QDialog.DialogCode.Accepted
+            if accepted:
+                self._do_switch(uuid, name, after)
+
+        run_task(
+            lambda: svc_mode_diff(uuid, name),
+            done=ask,
+            failed=lambda _m: ask(None),
         )
-        if confirm.exec() != QDialog.DialogCode.Accepted:
-            return
+
+    def _do_switch(self, uuid: str, name: str, after) -> None:
 
         def done(message: str) -> None:
             self.machines.subtitle.setText(message)
@@ -976,11 +1009,14 @@ class MainWindow(QMainWindow):
     def _run_schedules(self) -> None:
         import time as _time
 
-        now = _time.time()
+        from .scheduler import external_scheduler_active, snapshots_due
+
+        if external_scheduler_active():
+            return  # the --daemon service is handling these
         known = {d.uuid for d in self._domains}
-        for uuid, interval_s, keep, external, last_run in self.stats.schedules():
-            if uuid not in known or now - last_run < interval_s:
-                continue
+        for uuid, keep, external in snapshots_due(
+            self.stats.schedules(), known, _time.time()
+        ):
             self.stats.mark_schedule_run(uuid)
             name = "auto-" + _time.strftime("%Y%m%d-%H%M%S")
 
@@ -1003,31 +1039,28 @@ class MainWindow(QMainWindow):
     def _run_wake_schedules(self) -> None:
         import time as _time
 
+        from .scheduler import external_scheduler_active, wake_actions
+
+        if external_scheduler_active():
+            return  # the --daemon service is handling these
         now = _time.localtime()
-        hm = _time.strftime("%H:%M", now)
-        date = _time.strftime("%Y-%m-%d", now)
-        is_weekday = now.tm_wday < 5
         by_uuid = {d.uuid: d for d in self._domains}
-        for uuid, start_hm, stop_hm, days, last_fired in self.stats.wake_schedules():
-            d = by_uuid.get(uuid)
-            if d is None:
-                continue
-            if days == "weekdays" and not is_weekday:
-                continue
-            if days == "weekends" and is_weekday:
-                continue
-            if start_hm and hm == start_hm:
-                key = f"{date} {hm} start"
-                if last_fired != key and d.state == "shutoff" and not d.is_template:
-                    self.stats.mark_wake_fired(uuid, key)
-                    self._domain_action(uuid, "start")
-                    self._notify(f"{d.name} started", f"Power schedule ({hm}).")
-            elif stop_hm and hm == stop_hm:
-                key = f"{date} {hm} stop"
-                if last_fired != key and d.state == "running":
-                    self.stats.mark_wake_fired(uuid, key)
-                    self._domain_action(uuid, "shutdown")
-                    self._notify(f"{d.name} shutting down", f"Power schedule ({hm}).")
+        actions = wake_actions(
+            self.stats.wake_schedules(),
+            {u: (d.state, d.is_template) for u, d in by_uuid.items()},
+            _time.strftime("%H:%M", now),
+            _time.strftime("%Y-%m-%d", now),
+            now.tm_wday < 5,
+        )
+        for uuid, action, key in actions:
+            d = by_uuid[uuid]
+            self.stats.mark_wake_fired(uuid, key)
+            self._domain_action(uuid, action)
+            what = "started" if action == "start" else "shutting down"
+            self._notify(
+                f"{d.name} {what}",
+                f"Power schedule ({_time.strftime('%H:%M', now)}).",
+            )
 
     def _edit_wake_schedule(self, snap: DomainSnapshot) -> None:
         dialog = WakeScheduleDialog(
@@ -1065,6 +1098,49 @@ class MainWindow(QMainWindow):
             failed=lambda m: ErrorDialog(self._owner, "libvirt error", m).exec(),
         )
 
+    def _edit_usb_rules(self, snap: DomainSnapshot) -> None:
+        rules = self.stats.usb_rules_for(snap.uuid)
+
+        def show(devices) -> None:
+            usb = [d for d in devices if d.kind == "usb"]
+            dialog = UsbRulesDialog(self._owner, snap.name, usb, rules)
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return
+            self.stats.set_usb_rules(snap.uuid, dialog.chosen())
+            self._usb_tick()  # apply immediately if the device is here now
+
+        run_task(
+            svc_list_host_devices,
+            done=show,
+            failed=lambda m: ErrorDialog(self._owner, "libvirt error", m).exec(),
+        )
+
+    def _usb_tick(self) -> None:
+        rules = self.stats.usb_rules()
+        if not rules:
+            return
+
+        def act(state) -> None:
+            present, running, attached = state
+            for uuid, ident in usb_auto_attach_plan(
+                rules, present, running, attached
+            ):
+                name = next(
+                    (d.name for d in self._domains if d.uuid == uuid), uuid
+                )
+
+                def attached_now(_msg, u=uuid, n=name, i=ident) -> None:
+                    self.machines.subtitle.setText(f"usb {i} → {n}")
+                    self.stats.record_event(u, "usb-auto-attach", i)
+
+                run_task(
+                    lambda u=uuid, i=ident: svc_attach_hostdev(u, "usb", i),
+                    done=attached_now,
+                    failed=lambda m: log.warning("usb auto-attach: %s", m),
+                )
+
+        run_task(svc_usb_watch_state, done=act, failed=lambda _m: None)
+
     def _export_vm(self, snap: DomainSnapshot) -> None:
         dest = QFileDialog.getExistingDirectory(self._owner, "Export into folder")
         if not dest:
@@ -1088,6 +1164,25 @@ class MainWindow(QMainWindow):
                 self.worker.poke(),
             ),
             failed=lambda m: ErrorDialog(self._owner, "Import failed", m).exec(),
+        )
+
+    def _restore_backup(self) -> None:
+        folder = QFileDialog.getExistingDirectory(
+            self._owner, "Choose any backup in the chain"
+        )
+        if not folder:
+            return
+        self.machines.subtitle.setText("rebuilding backup chain…")
+        run_task(
+            lambda: svc_restore_backup(folder, "default"),
+            done=lambda name: (
+                self.machines.subtitle.setText(f"restored as {name}"),
+                self.worker.poke(),
+            ),
+            failed=lambda m: (
+                self.machines.subtitle.setText(""),
+                ErrorDialog(self._owner, "Restore failed", m).exec(),
+            ),
         )
 
     # -- command palette

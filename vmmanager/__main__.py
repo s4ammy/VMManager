@@ -42,11 +42,22 @@ def main() -> None:
         metavar="PATH",
         help="render the window offscreen, save a PNG, and exit (for development)",
     )
+    parser.add_argument(
+        "--daemon", action="store_true",
+        help="run scheduled snapshots and power schedules without a window "
+             "(see packaging/vmmanager-scheduler.service)",
+    )
     args = parser.parse_args()
 
     import logging
 
     log_file = logs.setup(logging.DEBUG if args.debug else logging.INFO)
+
+    if args.daemon:
+        from .scheduler import run_daemon
+
+        run_daemon()
+        return
 
     app = QApplication(sys.argv)
     # The name shown to people. setDesktopFileName has to keep matching

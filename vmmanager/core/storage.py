@@ -525,6 +525,323 @@ def svc_upload_volume_from_file_conn(conn, pool_name, name, file_path, fmt):
     return vol.path()
 
 
+def backup_chain(folder: str) -> list[str]:
+    """The backup folders from the full run to this one, oldest first.
+
+    Each folder's manifest names the checkpoint it wrote and the one it was
+    based on; sibling folders in the same directory are joined on those
+    names. Pure filesystem work - no libvirt.
+    """
+    import json
+    import os
+
+    def manifest(path):
+        try:
+            with open(os.path.join(path, "manifest.json")) as f:
+                m = json.load(f)
+        except (OSError, ValueError):
+            return None
+        # exports also carry a manifest, but no checkpoint chain
+        return m if isinstance(m, dict) and m.get("checkpoint") else None
+
+    folder = os.path.abspath(folder)
+    here = manifest(folder)
+    if here is None:
+        raise RuntimeError(
+            "Not an incremental-backup folder - no manifest.json naming a "
+            "checkpoint. Exported machines go through Import instead."
+        )
+    parent_dir = os.path.dirname(folder)
+    by_checkpoint: dict[str, tuple[str, dict]] = {}
+    for entry in sorted(os.listdir(parent_dir)):
+        path = os.path.join(parent_dir, entry)
+        m = manifest(path)
+        if m and m.get("name") == here["name"]:
+            by_checkpoint[m["checkpoint"]] = (path, m)
+
+    chain = [folder]
+    m = here
+    while m.get("parent"):
+        found = by_checkpoint.get(m["parent"])
+        if found is None:
+            raise RuntimeError(
+                f"This backup is based on checkpoint '{m['parent']}' and no "
+                f"folder next to it provides that - restoring needs the "
+                f"whole chain back to the full backup"
+            )
+        path, m = found
+        if path in chain:
+            raise RuntimeError("The backup manifests refer to each other in a loop")
+        chain.insert(0, path)
+    if m.get("kind") != "full":
+        raise RuntimeError(
+            "The start of this chain is not a full backup, so the disks "
+            "cannot be rebuilt completely"
+        )
+    return chain
+
+def _restore_plan(layers: list[str], workdir: str, dev: str):
+    """What reassembling one disk runs: (copies, commands, result file).
+
+    An incremental layer holds only the blocks that changed, so each one is
+    copied into workdir and rebased onto the layer below it - the backup
+    folders themselves are never written to - then the top of the chain is
+    flattened into a standalone image.
+    """
+    import os
+
+    copies: list[tuple[str, str]] = []
+    cmds: list[list[str]] = []
+    prev = layers[0]
+    for i, layer in enumerate(layers[1:], 1):
+        copy = os.path.join(workdir, f"{dev}.layer{i}.qcow2")
+        copies.append((layer, copy))
+        cmds.append([
+            "qemu-img", "rebase", "-u", "-f", "qcow2", "-F", "qcow2",
+            "-b", prev, copy,
+        ])
+        prev = copy
+    out_file = os.path.join(workdir, f"{dev}.restored.qcow2")
+    cmds.append(["qemu-img", "convert", "-O", "qcow2", prev, out_file])
+    return copies, cmds, out_file
+
+def svc_restore_backup(folder: str, pool_name: str) -> str:
+    """Rebuild disks from a full+incremental chain and define the machine.
+
+    The machine gets its original name, or '<name>-restored' when that is
+    taken - the original may well still exist, which is the point of a
+    backup. MAC addresses are dropped in that case so the two can run
+    side by side.
+    """
+    import json
+    import os
+    import tempfile
+
+    chain = backup_chain(folder)
+    with open(os.path.join(folder, "manifest.json")) as f:
+        manifest = json.load(f)
+    devs = manifest["disks"]
+
+    workdir = tempfile.mkdtemp(prefix="vmmanager-restore-")
+    try:
+        restored: dict[str, str] = {}
+        for dev in devs:
+            layers = [
+                p for c in chain
+                if os.path.exists(p := os.path.join(c, f"{dev}.qcow2"))
+            ]
+            if os.path.join(chain[-1], f"{dev}.qcow2") not in layers:
+                raise RuntimeError(
+                    f"{dev}.qcow2 is missing from the backup folder"
+                )
+            copies, cmds, out_file = _restore_plan(layers, workdir, dev)
+            for src, dst in copies:
+                shutil.copyfile(src, dst)
+            for cmd in cmds:
+                try:
+                    proc = subprocess.run(
+                        cmd, capture_output=True, text=True, timeout=3600
+                    )
+                except FileNotFoundError:
+                    raise RuntimeError(
+                        "qemu-img is needed to rebuild a backup chain - "
+                        "install qemu-img and try again"
+                    ) from None
+                if proc.returncode != 0:
+                    tail = (proc.stderr or "").strip().splitlines()
+                    raise RuntimeError(
+                        f"{' '.join(cmd[:2])} failed: "
+                        f"{tail[-1] if tail else 'no error output'}"
+                    )
+            restored[dev] = out_file
+
+        def go(conn):
+            root = ET.parse(os.path.join(folder, "domain.xml")).getroot()
+            name = manifest["name"]
+            final = name
+            for candidate in [name, f"{name}-restored"] + [
+                f"{name}-restored{i}" for i in range(2, 100)
+            ]:
+                try:
+                    conn.lookupByName(candidate)
+                except libvirt.libvirtError:
+                    final = candidate
+                    break
+            else:
+                raise RuntimeError(f"Every name from '{name}' on is taken")
+            name_el = root.find("name")
+            if name_el is not None:
+                name_el.text = final
+            for d in root.findall("devices/disk"):
+                target = d.find("target")
+                src = d.find("source")
+                if target is None or src is None:
+                    continue
+                dev = target.get("dev")
+                if dev in restored:
+                    path = svc_upload_volume_from_file_conn(
+                        conn, pool_name, f"{final}-{dev}.qcow2",
+                        restored[dev], "qcow2",
+                    )
+                    src.set("file", path)
+                    driver = d.find("driver")
+                    if driver is not None:
+                        driver.set("type", "qcow2")
+            uuid_el = root.find("uuid")
+            if uuid_el is not None:
+                root.remove(uuid_el)
+            nvram = root.find("os/nvram")
+            if nvram is not None:
+                nvram.text = None
+            if final != name:
+                # the original still exists - two NICs with one MAC collide
+                for iface in root.findall("devices/interface"):
+                    mac = iface.find("mac")
+                    if mac is not None:
+                        iface.remove(mac)
+            conn.defineXML(ET.tostring(root, encoding="unicode"))
+            return final
+
+        return _with_conn(go)
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def svc_move_disk(
+    uuid: str, dev: str, pool_name: str, delete_source: bool = False
+) -> str:
+    """Move one disk's storage into another pool.
+
+    On a running machine libvirt's blockCopy mirrors the disk onto the new
+    volume while the guest keeps writing, then pivots to it - no downtime.
+    On a stopped one the volume is cloned through the storage API. Either
+    way the persistent definition ends up pointing at the new volume; the
+    old one is deleted only when asked, and never while another machine
+    still refers to it.
+    """
+    import os
+    import time as _time
+
+    def go(conn):
+        dom = conn.lookupByUUIDString(uuid)
+        active = bool(dom.isActive())
+        root = ET.fromstring(
+            dom.XMLDesc(0 if active else libvirt.VIR_DOMAIN_XML_INACTIVE)
+        )
+        disk = next(
+            (
+                d for d in root.findall("devices/disk")
+                if (t := d.find("target")) is not None and t.get("dev") == dev
+            ),
+            None,
+        )
+        if disk is None:
+            raise RuntimeError(f"No disk '{dev}' on this machine")
+        src = disk.find("source")
+        if src is None or not src.get("file"):
+            raise RuntimeError(
+                f"'{dev}' is not a file-backed disk, so it has no volume to move"
+            )
+        src_path = src.get("file")
+        driver = disk.find("driver")
+        fmt = driver.get("type", "qcow2") if driver is not None else "qcow2"
+
+        dest_pool = conn.storagePoolLookupByName(pool_name)
+        if not dest_pool.isActive():
+            raise RuntimeError(f"Pool '{pool_name}' is not started")
+        try:
+            src_vol = conn.storageVolLookupByPath(src_path)
+        except libvirt.libvirtError:
+            src_vol = None
+        if src_vol is not None and src_vol.storagePoolLookupByVolume().name() == pool_name:
+            raise RuntimeError(f"'{dev}' is already in pool '{pool_name}'")
+        capacity = (
+            src_vol.info()[1] if src_vol is not None else os.path.getsize(src_path)
+        )
+
+        vol_name = os.path.basename(src_path)
+        try:
+            dest_pool.storageVolLookupByName(vol_name)
+            vol_name = f"{dom.name()}-{vol_name}"
+            dest_pool.storageVolLookupByName(vol_name)
+            raise RuntimeError(
+                f"Both '{os.path.basename(src_path)}' and '{vol_name}' "
+                f"already exist in '{pool_name}'"
+            )
+        except libvirt.libvirtError:
+            pass
+        vol_xml = (
+            f"<volume><name>{x(vol_name)}</name>"
+            f"<capacity unit='bytes'>{capacity}</capacity>"
+            f"<target><format type='{x(fmt)}'/></target></volume>"
+        )
+
+        if active:
+            new_vol = dest_pool.createXML(vol_xml, 0)
+            dest_path = new_vol.path()
+            try:
+                dom.blockCopy(
+                    dev,
+                    f"<disk type='file'><source file='{x(dest_path)}'/>"
+                    f"<driver type='{x(fmt)}'/></disk>",
+                    None,
+                    libvirt.VIR_DOMAIN_BLOCK_COPY_REUSE_EXT
+                    | libvirt.VIR_DOMAIN_BLOCK_COPY_TRANSIENT_JOB,
+                )
+                deadline = _time.monotonic() + 3600 * 4
+                while _time.monotonic() < deadline:
+                    info = dom.blockJobInfo(dev, 0)
+                    if not info:
+                        raise RuntimeError(
+                            "The copy job disappeared before finishing - "
+                            "check the libvirt log"
+                        )
+                    if info.get("end") and info["cur"] >= info["end"]:
+                        break
+                    _time.sleep(0.5)
+                else:
+                    raise RuntimeError("Copy did not finish within four hours")
+                dom.blockJobAbort(dev, libvirt.VIR_DOMAIN_BLOCK_JOB_ABORT_PIVOT)
+            except Exception:
+                try:
+                    dom.blockJobAbort(dev, 0)
+                except libvirt.libvirtError:
+                    pass
+                new_vol.delete(0)
+                raise
+        else:
+            new_vol = dest_pool.createXMLFrom(vol_xml, src_vol, 0)
+            dest_path = new_vol.path()
+
+        # point the persistent definition at the new volume
+        proot = ET.fromstring(dom.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE))
+        for d in proot.findall("devices/disk"):
+            t = d.find("target")
+            s = d.find("source")
+            if t is not None and t.get("dev") == dev and s is not None:
+                s.set("file", dest_path)
+        conn.defineXML(ET.tostring(proot, encoding="unicode"))
+
+        note = "old volume kept"
+        if delete_source and src_vol is not None:
+            used_by = []
+            for other in conn.listAllDomains():
+                if other.UUIDString() == uuid:
+                    continue
+                if src_path in other.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE):
+                    used_by.append(other.name())
+            if used_by:
+                note = (
+                    f"old volume kept - {', '.join(used_by)} still refers to it"
+                )
+            else:
+                src_vol.delete(0)
+                note = "old volume deleted"
+        return f"{dev} moved to '{pool_name}' ({note})"
+
+    return _with_conn(go)
+
+
 # -- the rest of libvirt's pool types
 #
 # Each needs a different <source>; a few need no target at all. Kept in one

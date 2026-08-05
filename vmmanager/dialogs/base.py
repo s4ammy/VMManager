@@ -191,9 +191,14 @@ class NameDialog(SizedDialog):
 
 
 class DiffDialog(SizedDialog):
-    """A unified diff, coloured the same way the history tab colours them."""
+    """A unified diff, coloured the same way the history tab colours them.
 
-    def __init__(self, parent, title: str, diff: str) -> None:
+    With `confirm` set it becomes a gate: the diff is what is about to
+    happen, and the named button applies it - accept means go ahead.
+    """
+
+    def __init__(self, parent, title: str, diff: str,
+                 confirm: str | None = None, note: str = "") -> None:
         super().__init__(parent)
         from PySide6.QtWidgets import QPlainTextEdit
 
@@ -205,6 +210,11 @@ class DiffDialog(SizedDialog):
         box.setContentsMargins(24, 22, 24, 20)
         box.setSpacing(10)
         box.addWidget(_title(title))
+        if note:
+            note_label = QLabel(note)
+            note_label.setWordWrap(True)
+            note_label.setProperty("class", "Dim")
+            box.addWidget(note_label)
         view = QPlainTextEdit()
         view.setReadOnly(True)
         view.setPlainText(diff)
@@ -212,8 +222,18 @@ class DiffDialog(SizedDialog):
         box.addWidget(view, 1)
         row = QHBoxLayout()
         row.addStretch(1)
-        close = QPushButton("Close")
-        close.setProperty("class", "GhostButton")
-        close.clicked.connect(self.accept)
-        row.addWidget(close)
+        if confirm is None:
+            close = QPushButton("Close")
+            close.setProperty("class", "GhostButton")
+            close.clicked.connect(self.accept)
+            row.addWidget(close)
+        else:
+            cancel = QPushButton("Cancel")
+            cancel.setProperty("class", "GhostButton")
+            cancel.clicked.connect(self.reject)
+            row.addWidget(cancel)
+            go = QPushButton(confirm)
+            go.setProperty("class", "PrimaryButton")
+            go.clicked.connect(self.accept)
+            row.addWidget(go)
         box.addLayout(row)

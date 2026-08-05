@@ -71,6 +71,12 @@ CREATE TABLE IF NOT EXISTS stacks (
     count    INTEGER NOT NULL,
     network  TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS usb_rules (
+    uuid  TEXT NOT NULL,
+    ident TEXT NOT NULL,
+    PRIMARY KEY (uuid, ident)
+);
 """
 XML_KEEP = 50  # config versions kept per domain
 
@@ -224,6 +230,30 @@ class StatsStore:
         self._db.execute(
             "UPDATE snap_schedules SET last_run = ? WHERE uuid = ?",
             (int(time.time()), uuid),
+        )
+        self._db.commit()
+
+    # -- auto-attach USB rules
+
+    @_when_open(list)
+    def usb_rules(self) -> list[tuple[str, str]]:
+        """(machine uuid, 'vvvv:pppp') for every auto-attach rule."""
+        return list(self._db.execute("SELECT uuid, ident FROM usb_rules"))
+
+    @_when_open(list)
+    def usb_rules_for(self, uuid: str) -> list[str]:
+        return [
+            ident for (ident,) in self._db.execute(
+                "SELECT ident FROM usb_rules WHERE uuid = ?", (uuid,)
+            )
+        ]
+
+    @_when_open(None)
+    def set_usb_rules(self, uuid: str, idents: list[str]) -> None:
+        self._db.execute("DELETE FROM usb_rules WHERE uuid = ?", (uuid,))
+        self._db.executemany(
+            "INSERT INTO usb_rules (uuid, ident) VALUES (?,?)",
+            [(uuid, ident) for ident in idents],
         )
         self._db.commit()
 

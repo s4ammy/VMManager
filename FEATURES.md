@@ -30,6 +30,9 @@ button you most likely want - Start, Resume, Restore or Shut down.
 - **Select several** with ctrl+click, then start, stop, snapshot or retag them
   together. Filter the list by tag.
 - **Live thumbnails** - optional real console previews on each row.
+- **Auto-attach USB** - right-click → *Auto-attach USB…*, tick a device, and
+  it is handed to that machine whenever it is plugged in while the machine
+  runs. A device already inside another guest is left alone.
 - **Guest health** - disk usage from inside the guest, with a warning before it
   fills up. Needs the guest agent.
 - **Delete** shows every disk with its size, and removes only the ones you tick.
@@ -67,6 +70,15 @@ nothing improved". The check names it, and fixes it: the right display device
 for the connection, the SPICE agent channel, a tablet. The guest's resolution
 can then follow the window, on VNC as well as SPICE.
 
+**Drop a file on the console** and it lands inside the guest through the
+agent - /tmp on Unix guests, C:\Users\Public on Windows. Several files
+queue up and send one after another.
+
+**Encrypted consoles**, as an option in Settings: VeNCrypt (TLS, x509) for
+VNC and TLS channels for SPICE, with a CA-certificate field and a
+skip-verification switch for self-signed setups. A server that only offers
+TLS is negotiated encrypted regardless of the setting.
+
 **Serial** - a terminal on the machine's serial console, for when networking is
 broken and the graphical console tells you nothing.
 
@@ -76,7 +88,10 @@ broken and the graphical console tells you nothing.
 30 days, so you can scrub back through the last few minutes or the last week.
 
 **XML** - edit the machine's definition directly, with highlighting, and it is
-checked before it is saved.
+checked before it is saved. Saving first shows a **diff of what actually
+changes** - the same coloured diff the History tab draws - so a stray edit is
+caught before it lands. Mode switches show the same preview. Turning
+confirmations off in Settings skips it.
 
 **Toolbox** - run a command inside the guest, fetch a file out of it, send a
 file in, and read a timeline of everything that has happened to the machine.
@@ -136,6 +151,13 @@ Where libvirt insists on a dependency, it is handled for you - turning on
 
 **PCI passthrough diagnostics** show IOMMU groups, which driver each device is
 bound to, and a plain verdict on whether passthrough will work and why not.
+SR-IOV devices are annotated - a physical function shows how many VFs are
+enabled, a virtual function names its parent.
+
+**Mediated devices (vGPU)** - the types the host's driver advertises (NVIDIA
+vGPU, Intel GVT-g), instances created and deleted through libvirt's
+node-device API, and assigned from *Install hardware → Mediated device*.
+Instances are transient across host reboots, and the dialog says so.
 
 ## Modes
 
@@ -189,6 +211,12 @@ imports a disk image you already have, or starts empty.
 wizard. It downloads once, checks the checksum, imports into a pool and fills in
 the defaults. No browser, no manual conversion.
 
+**Machines from other hypervisors** - the import path also takes VMware,
+VirtualBox and Hyper-V disks (vmdk, vdi, vhdx/vhd) and whole OVA/OVF
+appliances. The disk is converted to qcow2 into the target pool on create;
+an appliance's descriptor fills in the name, CPU count and memory. Only the
+first disk of a multi-disk appliance is imported, and the wizard says so.
+
 ## Templates, clones and stacks
 
 - Mark a machine as a **template**.
@@ -204,16 +232,30 @@ the defaults. No browser, no manual conversion.
 - **Snapshots**, internal or external. External ones work with UEFI and on
   running machines, and can include memory state. Shown as a parent/child tree.
 - **Scheduled snapshots** per machine - hourly, daily or weekly, keeping the
-  last N and pruning the rest. Runs while the app is open.
+  last N and pruning the rest. They run while the app is open, or all the
+  time with the **scheduler service**: `vmmanager --daemon`, with a systemd
+  user unit shipped in `packaging/`. The app notices the service and stands
+  its own timers down, so nothing fires twice.
 - **Backup to a folder** - definition plus disks, with one-click import back.
 - **Incremental backups** built on libvirt checkpoints: the first run starts a
   chain, later runs copy only the blocks that changed.
+- **Restore a backup chain**: point it at any backup folder and the full run
+  plus every incremental before it are reassembled into a bootable machine -
+  *Import → Restore incremental backup*, or the Backups tab. The original
+  folders are never written to, and a machine that still exists comes back as
+  `name-restored` with fresh MACs so the two can run side by side.
 - **Disk reclaimer** finds volumes nothing refers to any more - backing chains
   and NVRAM files accounted for - and deletes only what you tick.
 - **Disk compaction** rewrites qcow2 images without the space they no longer
   need, streaming through libvirt so root-owned pools work.
 
 ## Storage and networks
+
+**Move a disk to another pool** from its faceplate on the Hardware tab. A
+running machine's disk is mirrored onto the new volume with blockCopy and
+pivoted over - no downtime; a stopped one is cloned through the storage API.
+The old volume is deleted only if asked, and never while another machine
+still refers to it.
 
 **Storage pools** of every type libvirt supports: plain directories, NFS,
 filesystems, LVM, disks, iSCSI, SCSI, multipath, Ceph/RBD, Gluster and ZFS.
@@ -225,6 +267,11 @@ without local paths.
 ranges and fixed addresses, static routes, a DNS domain with forwarders and host
 entries, and portgroups with bandwidth limits. Start, stop, autostart, and see
 the live DHCP leases.
+
+**Network filters** - libvirt's per-NIC firewall rules (`clean-traffic`,
+anti-spoofing, and your own), managed from *Networks → Filters…* and assigned
+per interface in the NIC editor, with the optional IP parameter that pins a
+guest to one address.
 
 **Topology map** - networks and machines as a live graph you can click through.
 

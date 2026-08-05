@@ -32,6 +32,11 @@ def _hostdev_ident(h: ET.Element) -> HostdevInfo | None:
                 f"{int(a.get('slot', '0'), 16):02x}.{int(a.get('function', '0'), 16):x}"
             ),
         )
+    if kind == "mdev":
+        a = src.find("address")
+        if a is None or not a.get("uuid"):
+            return None
+        return HostdevInfo(kind="mdev", ident=a.get("uuid"))
     return None
 
 def _boot_entries(root: ET.Element) -> tuple[str, ...]:

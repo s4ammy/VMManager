@@ -42,6 +42,35 @@ class XmlMixin:
 
     def _save_xml(self) -> None:
         xml = self.xml_edit.toPlainText()
+        uuid = self.uuid
+        from ..settings import confirmations_enabled
+
+        if not uuid or not confirmations_enabled():
+            self._define_xml(xml)
+            return
+
+        def show(diff: str) -> None:
+            if not diff:
+                self.xml_status.setText(
+                    "nothing to save - the definition already reads like this"
+                )
+                return
+            from ...dialogs import DiffDialog
+
+            dialog = DiffDialog(
+                self, "What saving changes", diff, confirm="Save definition",
+                note="Applies on the machine's next start.",
+            )
+            if dialog.exec() == QDialog.DialogCode.Accepted:
+                self._define_xml(xml)
+
+        run_task(
+            lambda: svc_definition_diff(uuid, xml),
+            done=show,
+            failed=lambda m: ErrorDialog(self, "Invalid definition", m).exec(),
+        )
+
+    def _define_xml(self, xml: str) -> None:
         run_task(
             lambda: svc_define_xml(xml),
             done=lambda _: self.xml_status.setText(

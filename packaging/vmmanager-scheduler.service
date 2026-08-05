@@ -1,0 +1,24 @@
+# Scheduled snapshots and power schedules without the app open.
+#
+# Install as a user unit:
+#   cp packaging/vmmanager-scheduler.service ~/.config/systemd/user/
+#   systemctl --user enable --now vmmanager-scheduler
+#
+# It runs the same schedules the app runs, from the same database; the app
+# notices it and stands its own timers down, so nothing fires twice. To keep
+# it running while logged out: loginctl enable-linger $USER
+
+[Unit]
+Description=VMManager scheduled snapshots and power schedules
+# libvirtd is socket-activated on most systems; the daemon retries anyway
+After=default.target
+
+[Service]
+Type=simple
+# env does the PATH lookup, so this works however vmmanager was installed
+ExecStart=/usr/bin/env vmmanager --daemon
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=default.target

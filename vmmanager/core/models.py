@@ -60,6 +60,38 @@ class NicInfo:
     mac: str
     source: str
     model: str
+    filter: str = ""  # nwfilter name from <filterref>, "" when none
+
+@dataclass(frozen=True)
+class MdevType:
+    parent: str    # PCI address of the card offering it
+    type_id: str   # e.g. nvidia-63, i915-GVTg_V5_4
+    name: str      # the driver's human name for it
+    api: str       # device_api - vfio-pci for everything assignable
+    available: int  # instances that can still be created
+
+@dataclass(frozen=True)
+class MdevInfo:
+    uuid: str
+    parent: str
+    type_id: str
+    attached_to: str | None = None
+
+@dataclass(frozen=True)
+class SriovPf:
+    address: str
+    interface: str  # netdev name when it is a NIC, "" otherwise
+    numvfs: int
+    totalvfs: int
+    vfs: tuple[str, ...] = ()
+
+@dataclass(frozen=True)
+class NwFilterInfo:
+    name: str
+    uuid: str
+    chain: str
+    rules: int  # how many of its own <rule> elements
+    refs: tuple[str, ...] = ()  # filters it includes by reference
 
 @dataclass(frozen=True)
 class HostdevInfo:
@@ -193,6 +225,7 @@ class GraphicsInfo:
     port: int
     socket: str
     has_password: bool
+    tls_port: int = -1  # SPICE's separate TLS port; -1 when none
 
 @dataclass(frozen=True)
 class DisplayHealth:
@@ -289,6 +322,7 @@ class IommuDevice:
     driver: str
     is_bridge: bool
     attached_to: str | None  # domain name currently using it
+    sriov: str = ""  # "PF, 4 of 64 VFs enabled" / "VF of 0000:05:00.0"
 
 @dataclass(frozen=True)
 class IommuReport:

@@ -121,14 +121,27 @@ class SpiceClient(QWidget):
 
     # -- lifecycle
 
-    def open_tcp(self, host: str, port: int, password: str = "") -> None:
+    def open_tcp(self, host: str, port: int, password: str = "",
+                 tls_port: int = -1) -> None:
         self.close_connection()
         if not SPICE_AVAILABLE:
             self.state_changed.emit("error: spice-glib not available on this host")
             return
         session = Spice.Session()
         session.props.host = host
-        session.props.port = str(port)
+        if port > 0:
+            session.props.port = str(port)
+        if tls_port > 0:
+            from ..pages.settings import console_tls_ca, console_tls_no_verify
+
+            session.props.tls_port = str(tls_port)
+            # otherwise only the channels the server marks secure use it
+            session.props.secure_channels = ["all"]
+            ca = console_tls_ca()
+            if ca:
+                session.props.ca_file = ca
+            if console_tls_no_verify():
+                session.props.verify = Spice.SessionVerify(0)
         if password:
             session.props.password = password
         GObject.Object.connect(session, "channel-new", self._on_channel_new)

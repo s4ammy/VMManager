@@ -54,6 +54,13 @@ def svc_list_host_devices() -> list[HostDevice]:
     return _with_conn(go)
 
 def _hostdev_xml(kind: str, ident: str) -> str:
+    if kind == "mdev":
+        return (
+            "<hostdev mode='subsystem' type='mdev' model='vfio-pci' "
+            "managed='no'>\n"
+            f"  <source><address uuid='{ident}'/></source>\n"
+            "</hostdev>"
+        )
     if kind == "usb":
         vendor, product = ident.split(":")
         return f"""<hostdev mode='subsystem' type='usb' managed='yes'>
@@ -228,6 +235,76 @@ def _pci_label(conn, address: str) -> str:
     except (libvirt.libvirtError, ET.ParseError, AttributeError):
         return address
 
+def usb_auto_attach_plan(
+    rules: list[tuple[str, str]],
+    present: set[str],
+    running: set[str],
+    attached: dict[str, set[str]],
+) -> list[tuple[str, str]]:
+    """Which (machine uuid, usb ident) pairs to attach right now.
+
+    A rule fires when its device is plugged in and its machine is running.
+    A device already inside any guest is left alone - USB cannot be in two
+    places, and pulling it out of the machine it is in would be worse than
+    doing nothing.
+    """
+    claimed = {ident for idents in attached.values() for ident in idents}
+    plan = []
+    for uuid, ident in rules:
+        if ident not in present or uuid not in running:
+            continue
+        if ident in claimed:
+            continue
+        plan.append((uuid, ident))
+        claimed.add(ident)  # two rules for one device: first one wins
+    return plan
+
+def svc_usb_watch_state() -> tuple[set[str], set[str], dict[str, set[str]]]:
+    """One pass for the auto-attach tick: (usb idents present on the host,
+    running machine uuids, usb idents attached per machine)."""
+
+    def go(conn):
+        present = set()
+        for dev in conn.listAllDevices(
+            libvirt.VIR_CONNECT_LIST_NODE_DEVICES_CAP_USB_DEV
+        ):
+            root = ET.fromstring(dev.XMLDesc(0))
+            cap = root.find("capability[@type='usb_device']")
+            if cap is None:
+                continue
+            vendor = cap.find("vendor")
+            product = cap.find("product")
+            if vendor is None or product is None:
+                continue
+            try:
+                present.add(
+                    f"{int(vendor.get('id', '0'), 16):04x}:"
+                    f"{int(product.get('id', '0'), 16):04x}"
+                )
+            except ValueError:
+                continue
+        running: set[str] = set()
+        attached: dict[str, set[str]] = {}
+        for dom in conn.listAllDomains():
+            uuid = dom.UUIDString()
+            if dom.isActive():
+                running.add(uuid)
+            try:
+                root = ET.fromstring(dom.XMLDesc(0))
+            except libvirt.libvirtError:
+                continue
+            idents = {
+                info.ident
+                for h in root.findall("devices/hostdev")
+                if (info := _hostdev_ident(h)) is not None
+                and info.kind == "usb"
+            }
+            if idents:
+                attached[uuid] = idents
+        return present, running, attached
+
+    return _with_conn(go)
+
 def svc_iommu_report() -> IommuReport:
     """IOMMU groups, bound drivers, and what each device is used by."""
     import os
@@ -265,6 +342,20 @@ def svc_iommu_report() -> IommuReport:
                         pci_class = f.read().strip()
                 except OSError:
                     pass
+                sriov = ""
+                physfn = os.path.join(sysfs, "physfn")
+                if os.path.islink(physfn):
+                    sriov = f"VF of {os.path.basename(os.readlink(physfn))}"
+                else:
+                    try:
+                        with open(os.path.join(sysfs, "sriov_totalvfs")) as f:
+                            total = int(f.read().strip() or 0)
+                        with open(os.path.join(sysfs, "sriov_numvfs")) as f:
+                            num = int(f.read().strip() or 0)
+                        if total > 0:
+                            sriov = f"SR-IOV PF, {num} of {total} VFs enabled"
+                    except (OSError, ValueError):
+                        pass
                 devices.append(
                     IommuDevice(
                         address=address,
@@ -273,6 +364,7 @@ def svc_iommu_report() -> IommuReport:
                         driver=driver or "(none)",
                         is_bridge=pci_class.startswith("0x0604"),
                         attached_to=in_use.get(address),
+                        sriov=sriov,
                     )
                 )
         return IommuReport(enabled=True, devices=tuple(devices))

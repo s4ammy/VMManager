@@ -60,11 +60,13 @@ def svc_get_hardware(uuid: str) -> Hardware:
                     or src_el.get("dev")
                     or ""
                 )
+            fref = n.find("filterref")
             nics.append(
                 NicInfo(
                     mac=mac.get("address", "?") if mac is not None else "?",
                     source=src,
                     model=model.get("type", "?") if model is not None else "?",
+                    filter=fref.get("filter", "") if fref is not None else "",
                 )
             )
         hostdevs = []

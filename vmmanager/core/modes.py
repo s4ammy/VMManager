@@ -192,6 +192,24 @@ def svc_delete_mode(uuid: str, name: str) -> str:
     return f"Deleted mode '{name}'."
 
 
+def svc_definition_diff(uuid: str, proposed_xml: str) -> str:
+    """Unified diff from the current persistent definition to a proposed one.
+
+    Empty when nothing would change. Both sides are re-indented first so the
+    diff shows edits, not formatting.
+    """
+
+    def go(conn):
+        current = _domain_xml(conn, uuid)
+        lines = difflib.unified_diff(
+            canonical(current).splitlines(),
+            canonical(proposed_xml).splitlines(),
+            fromfile="current", tofile="proposed", lineterm="",
+        )
+        return "\n".join(lines)
+
+    return _with_conn(go)
+
 def svc_mode_diff(uuid: str, name: str) -> str:
     """Unified diff from the current definition to the saved mode."""
 

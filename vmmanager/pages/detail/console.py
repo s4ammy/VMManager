@@ -5,6 +5,24 @@ from __future__ import annotations
 from .common import *  # noqa: F403 - shared imports for the tab modules
 
 
+def dropped_files(mime) -> list[str]:
+    """Local file paths out of a drag's mime data; anything else is skipped."""
+    if not mime.hasUrls():
+        return []
+    return [u.toLocalFile() for u in mime.urls() if u.isLocalFile()]
+
+
+def drop_destination(os_key: str, filename: str) -> str:
+    """Where a dropped file lands inside the guest.
+
+    /tmp exists on every Unix guest; Windows has no /tmp, so files go to
+    the Public profile, which every account can read.
+    """
+    if os_key == "windows":
+        return f"C:\\Users\\Public\\{filename}"
+    return f"/tmp/{filename}"
+
+
 class ConsoleMixin:
     """Mixed into DetailPage; expects its attributes."""
 
@@ -32,6 +50,9 @@ class ConsoleMixin:
         self.console_stack.addWidget(self.vnc)
         self.console_stack.addWidget(self.spice)
         box.addWidget(self.console_stack, 1)
+        # files dropped on the console are sent into the guest via the agent
+        self.console_stack.setAcceptDrops(True)
+        self.console_stack.installEventFilter(self)
         self._tunnel: SSHTunnel | None = None
 
         # Four controls, not seven: the everyday ones stay out, the rest live
@@ -78,6 +99,62 @@ class ConsoleMixin:
         row.addWidget(more_btn)
         box.addLayout(row)
         return page
+
+    def eventFilter(self, obj, event) -> bool:
+        if obj is getattr(self, "console_stack", None):
+            from PySide6.QtCore import QEvent
+
+            if event.type() in (QEvent.Type.DragEnter, QEvent.Type.DragMove):
+                if dropped_files(event.mimeData()):
+                    event.acceptProposedAction()
+                    return True
+            elif event.type() == QEvent.Type.Drop:
+                paths = dropped_files(event.mimeData())
+                if paths:
+                    event.acceptProposedAction()
+                    self._send_dropped(paths)
+                    return True
+        return super().eventFilter(obj, event)
+
+    def _send_dropped(self, paths: list[str]) -> None:
+        if not self.uuid:
+            return
+        if not self._snap or self._snap.state != "running":
+            self.console_hint.setText(
+                "dropped file not sent - the machine is not running"
+            )
+            return
+        uuid = self.uuid
+        os_key = self._snap.os_key
+        remaining = list(paths)
+        total = len(paths)
+
+        def send_next() -> None:
+            if not remaining:
+                return
+            local = remaining.pop(0)
+            dest = drop_destination(os_key, local.rsplit("/", 1)[-1])
+            n = total - len(remaining)
+            self.console_hint.setText(
+                f"sending {local.rsplit('/', 1)[-1]} → {dest}"
+                + (f" ({n}/{total})" if total > 1 else "")
+                + "…"
+            )
+
+            def done(msg) -> None:
+                self.console_hint.setText(str(msg))
+                send_next()
+
+            run_task(
+                lambda: svc_send_file(uuid, local, dest),
+                done=done,
+                failed=lambda m: self.console_hint.setText(
+                    "send failed - it needs qemu-guest-agent in the guest: "
+                    f"{m}"
+                ),
+            )
+
+        send_next()
 
     def _console_more_menu(self, anchor: QPushButton) -> None:
         menu = QMenu(self)
@@ -196,7 +273,9 @@ class ConsoleMixin:
                 (g for g in graphics if g.type == "vnc" and (g.port > 0 or g.socket)),
                 None,
             ) or next(
-                (g for g in graphics if g.type == "spice" and g.port > 0), None
+                (g for g in graphics
+                 if g.type == "spice" and (g.port > 0 or g.tls_port > 0)),
+                None,
             )
             if display is None:
                 types = ", ".join(g.type for g in graphics) or "none"
@@ -225,24 +304,40 @@ class ConsoleMixin:
             return
         ssh = ssh_target_of(current_uri())
         if ssh is None:
-            self._open_client(client, display.host, display.port)
+            from ..settings import console_tls
+
+            tls_port = -1
+            if display.type == "spice" and display.tls_port > 0 and (
+                console_tls() or display.port <= 0  # TLS-only server
+            ):
+                tls_port = display.tls_port
+            self._open_client(client, display.host, display.port, tls_port)
             return
-        # remote host: the display listens on its loopback - tunnel to it
+        # remote host: the display listens on its loopback - tunnel to it.
+        # The tunnel itself is the encryption, so the plain port is used
+        # when there is one; a TLS-only display tunnels its TLS port.
         target, keyfile = ssh
+        remote_port = display.port if display.port > 0 else display.tls_port
+        tls_only = display.port <= 0
         self.console_hint.setText(f"opening ssh tunnel to {target}…")
-        tunnel = SSHTunnel(target, display.host, display.port, keyfile, parent=self)
+        tunnel = SSHTunnel(target, display.host, remote_port, keyfile, parent=self)
         self._tunnel = tunnel
         tunnel.ready.connect(
-            lambda port: self._open_client(client, "127.0.0.1", port)
+            lambda port: self._open_client(
+                client, "127.0.0.1",
+                -1 if tls_only else port,
+                port if tls_only else -1,
+            )
         )
         tunnel.failed.connect(
             lambda m: self.console_hint.setText(f"tunnel failed: {m}")
         )
         tunnel.start()
 
-    def _open_client(self, client, host: str, port: int) -> None:
+    def _open_client(self, client, host: str, port: int,
+                     tls_port: int = -1) -> None:
         if client is self.spice:
-            client.open_tcp(host, port)
+            client.open_tcp(host, port, tls_port=tls_port)
         else:
             client.open_tcp(host, port, self._vnc_password)
 

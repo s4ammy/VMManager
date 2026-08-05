@@ -13,7 +13,7 @@ class HardwareMixin:
         "cpu": "CPU", "mem": "MEM", "boot": "BOOT", "labels": "TAG",
         "disk": "DSK", "cdrom": "ODD", "nic": "NIC", "video": "GPU",
         "gfx": "DSP", "sound": "SND", "input": "INP", "usb": "USB",
-        "pci": "PCI", "fs": "FS", "watchdog": "WDT", "redir": "URD",
+        "pci": "PCI", "mdev": "MDV", "fs": "FS", "watchdog": "WDT", "redir": "URD",
         "vsock": "VSK", "panic": "PNC", "smartcard": "SCD", "audio": "AUD",
         "dimm": "DIM", "controller": "CTL", "ports": "PRT", "tune": "TUN",
         "features": "FEA",
@@ -215,6 +215,7 @@ class HardwareMixin:
         "input": "input device",
         "usb": "USB device",
         "pci": "PCI device",
+        "mdev": "mediated device",
         "fs": "shared folder",
         "watchdog": "watchdog",
         "redir": "USB redirection",
@@ -243,7 +244,7 @@ class HardwareMixin:
             return self._remove_disk
         if kind == "nic":
             return self._remove_nic
-        if kind in ("usb", "pci"):
+        if kind in ("usb", "pci", "mdev"):
             return self._remove_hostdev
         if kind == "fs":
             return self._remove_share
@@ -396,7 +397,7 @@ class HardwareMixin:
             return str(payload)
         if kind == "input":
             return f"{payload[0]}/{payload[1]}"
-        if kind in ("usb", "pci"):
+        if kind in ("usb", "pci", "mdev"):
             return payload.ident
         if kind == "fs":
             return payload.tag
@@ -546,6 +547,8 @@ class HardwareMixin:
             if kind == "cdrom":
                 buttons.append(_ghost("Change media…", self._change_media))
             buttons.append(_ghost("Cache mode…", self._edit_disk_cache))
+            if kind == "disk":
+                buttons.append(_ghost("Move to pool…", self._move_disk))
             buttons.append(_ghost("Remove", self._remove_disk))
             self._panel_actions(*buttons)
         elif kind == "nic":
@@ -554,6 +557,7 @@ class HardwareMixin:
             self._panel_row("mac", n.mac)
             self._panel_row("model", n.model)
             self._panel_row("network", n.source or " - ")
+            self._panel_row("filter", n.filter or " - ")
             self._panel_actions(
                 _ghost("Edit…", lambda: self._edit_nic(n)),
                 _ghost("Remove", self._remove_nic),
@@ -594,15 +598,20 @@ class HardwareMixin:
                 hint = QLabel("Built into the machine type.")
                 hint.setObjectName("ConsoleHint")
                 self.hw_panel.addWidget(hint)
-        elif kind in ("usb", "pci"):
+        elif kind in ("usb", "pci", "mdev"):
             h = payload
-            self._panel_title(badge, f"Host device - {h.ident}")
+            title = ("Mediated device" if h.kind == "mdev"
+                     else "Host device")
+            self._panel_title(badge, f"{title} - {h.ident}")
             self._panel_row("type", h.kind.upper())
-            self._panel_row("address", h.ident)
-            self._panel_actions(
-                _ghost("Options…", lambda: self._edit_hostdev_options(h)),
-                _ghost("Detach from machine", self._remove_hostdev),
-            )
+            self._panel_row("address" if h.kind != "mdev" else "uuid", h.ident)
+            actions = []
+            if h.kind != "mdev":
+                actions.append(
+                    _ghost("Options…", lambda: self._edit_hostdev_options(h))
+                )
+            actions.append(_ghost("Detach from machine", self._remove_hostdev))
+            self._panel_actions(*actions)
         elif kind == "labels":
             self._panel_title(badge, "Name and notes")
             self._panel_row("title", hw.title or " - ")
@@ -707,6 +716,7 @@ class HardwareMixin:
         menu.addAction("Network interface…", self._add_nic)
         menu.addAction("Shared folder…", self._add_share)
         menu.addAction("Host device (USB / PCI)…", self._add_hostdev)
+        menu.addAction("Mediated device (vGPU)…", self._add_mdev)
         menu.addAction("Check PCI passthrough…", self._passthrough_check)
         other = menu.addMenu("Other devices")
         if not self._hw.watchdog:
@@ -779,6 +789,58 @@ class HardwareMixin:
                     ),
                 )
         menu.exec(anchor.mapToGlobal(anchor.rect().bottomLeft()))
+
+    def _add_mdev(self) -> None:
+        uuid = self.uuid
+        if not uuid:
+            return
+
+        def load(done) -> None:
+            run_task(
+                lambda: (svc_mdev_types(), svc_list_mdevs()),
+                done=done, failed=self._hw_failed,
+            )
+
+        def show(data) -> None:
+            types, mdevs = data
+            dialog = MdevDialog(self, types, mdevs)
+
+            def refresh(message: str) -> None:
+                dialog.status.setText(message)
+                load(lambda d: dialog.populate(*d))
+
+            def create(parent: str, type_id: str) -> None:
+                run_task(
+                    lambda: svc_create_mdev(parent, type_id),
+                    done=lambda mdev_uuid: refresh(f"created {mdev_uuid}"),
+                    failed=lambda m: dialog.status.setText(str(m)),
+                )
+
+            def delete(mdev_uuid: str) -> None:
+                run_task(
+                    lambda: svc_delete_mdev(mdev_uuid),
+                    done=lambda _: refresh(f"deleted {mdev_uuid}"),
+                    failed=lambda m: dialog.status.setText(str(m)),
+                )
+
+            dialog.create_requested = create
+            dialog.delete_requested = delete
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return
+            chosen = dialog.chosen()
+            if chosen is None:
+                return
+            if chosen.attached_to:
+                ErrorDialog(
+                    self, "Already assigned",
+                    f"That instance is assigned to '{chosen.attached_to}'.",
+                ).exec()
+                return
+            self._hw_run(
+                lambda: svc_attach_hostdev(uuid, "mdev", chosen.uuid)
+            )
+
+        load(show)
 
     def _passthrough_check(self) -> None:
         if is_remote_uri(current_uri()):
@@ -1188,6 +1250,42 @@ class HardwareMixin:
             failed=self._hw_failed,
         )
 
+    def _move_disk(self) -> None:
+        sel = self._selected_device()
+        if not sel or sel[0] != "disk" or not self.uuid:
+            self.hw_status.setText("select a disk first")
+            return
+        disk = sel[1]
+        uuid = self.uuid
+        running = self._snap is not None and self._snap.state == "running"
+
+        def show(pools) -> None:
+            dialog = MoveDiskDialog(self, disk.dev, pools, disk.source, running)
+            if dialog.pool.count() == 0:
+                ErrorDialog(
+                    self, "Nowhere to move it",
+                    "No other active pool on this connection.",
+                ).exec()
+                return
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return
+            pool = dialog.pool.currentText()
+            delete_source = dialog.delete_source.isChecked()
+            self.hw_status.setText(
+                f"moving {disk.dev} to '{pool}'"
+                + (" while the machine runs…" if running else "…")
+            )
+            run_task(
+                lambda: svc_move_disk(uuid, disk.dev, pool, delete_source),
+                done=lambda msg: (
+                    self.hw_status.setText(str(msg)),
+                    self._load_hardware(),
+                ),
+                failed=self._hw_failed,
+            )
+
+        run_task(svc_list_pools, done=show, failed=self._hw_failed)
+
     def _edit_boot_order(self) -> None:
         if not self._hw or not self.uuid:
             return
@@ -1350,7 +1448,7 @@ class HardwareMixin:
 
     def _remove_hostdev(self) -> None:
         sel = self._selected_device()
-        if not sel or sel[0] not in ("usb", "pci") or not self.uuid:
+        if not sel or sel[0] not in ("usb", "pci", "mdev") or not self.uuid:
             return
         dev = sel[1]
         uuid = self.uuid
@@ -1467,23 +1565,47 @@ class HardwareMixin:
         if not uuid:
             return
 
-        def show(networks: list[str]) -> None:
-            dialog = NicEditDialog(self, nic, networks)
+        def show(networks: list[str], filters: list[str]) -> None:
+            dialog = NicEditDialog(self, nic, networks, filters)
             if dialog.exec() != QDialog.DialogCode.Accepted:
                 return
             new_mac = dialog.mac.text().strip()
             model = dialog.model.currentText()
             link_up = dialog.link_up.isChecked()
-            self._hw_run(
-                lambda: svc_set_nic(
+            new_filter = dialog.chosen_filter()
+            filter_ip = (
+                dialog.filter_ip.text().strip() if dialog.filter_ip else ""
+            )
+            filter_changed = filters and (new_filter != nic.filter or filter_ip)
+
+            def apply() -> str:
+                messages = [svc_set_nic(
                     uuid, nic.mac,
                     new_mac=new_mac if new_mac.lower() != nic.mac.lower() else None,
                     model=model if model != nic.model else None,
                     link_up=link_up,
-                )
-            )
+                )]
+                if filter_changed:
+                    # the MAC may just have changed above
+                    mac_now = new_mac or nic.mac
+                    messages.append(
+                        "filter: " + svc_set_nic_filter(
+                            uuid, mac_now, new_filter, filter_ip
+                        )
+                    )
+                return " · ".join(messages)
 
-        run_task(svc_list_network_names, done=show, failed=self._hw_failed)
+            self._hw_run(apply)
+
+        run_task(
+            svc_list_network_names,
+            done=lambda networks: run_task(
+                svc_nwfilter_names,
+                done=lambda filters: show(networks, filters),
+                failed=lambda _m: show(networks, []),
+            ),
+            failed=self._hw_failed,
+        )
 
     def _edit_watchdog(self) -> None:
         uuid = self.uuid

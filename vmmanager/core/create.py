@@ -8,6 +8,7 @@ import subprocess
 import libvirt
 
 from .connection import _with_conn, current_uri
+from .convert import convert_cmd, foreign_disk_files, foreign_format, is_foreign_source
 from .devices import _detect_format
 from .models import CloudInit, CreateSpec
 from .xmlesc import x
@@ -122,6 +123,80 @@ def svc_create_vm_from_url(spec: CreateSpec) -> str:
     )
 
 
+def _upload_file_conn(conn, pool_name: str, name: str, file_path: str,
+                      fmt: str) -> str:
+    """Stream a local file into a pool volume; its path. Chunked, so a
+    multi-GB convert result never sits in memory."""
+    import os
+
+    size = os.path.getsize(file_path)
+    pool = conn.storagePoolLookupByName(pool_name)
+    try:
+        pool.storageVolLookupByName(name).delete(0)
+    except libvirt.libvirtError:
+        pass
+    vol = pool.createXML(
+        f"""<volume>
+  <name>{x(name)}</name>
+  <capacity unit='bytes'>{size}</capacity>
+  <target><format type='{x(fmt)}'/></target>
+</volume>""",
+        0,
+    )
+    stream = conn.newStream()
+    vol.upload(stream, 0, size)
+    try:
+        with open(file_path, "rb") as f:
+            while chunk := f.read(1024 * 1024):
+                sent = 0
+                while sent < len(chunk):
+                    sent += stream.send(chunk[sent:])
+        stream.finish()
+    except (libvirt.libvirtError, OSError):
+        stream.abort()
+        vol.delete(0)
+        raise
+    return vol.path()
+
+def _import_foreign(conn, spec: CreateSpec) -> str:
+    """A foreign source (vmdk/vhdx/vhd/vdi/ova/ovf) as a qcow2 volume in
+    the target pool; its path.
+
+    Only the first disk of a multi-disk appliance is imported - the boot
+    disk, by OVF convention - and the wizard says so up front rather than
+    quietly dropping the rest.
+    """
+    import os
+    import shutil
+    import tempfile
+
+    workdir = tempfile.mkdtemp(prefix="vmmanager-import-")
+    try:
+        disks = foreign_disk_files(spec.import_path, workdir)
+        src = disks[0]
+        dst = os.path.join(workdir, f"{spec.name}.qcow2")
+        cmd = convert_cmd(src, dst, foreign_format(src))
+        try:
+            proc = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=3600
+            )
+        except FileNotFoundError:
+            raise RuntimeError(
+                "qemu-img is needed to import images from other "
+                "hypervisors - install qemu-img and try again"
+            ) from None
+        if proc.returncode != 0:
+            tail = (proc.stderr or "").strip().splitlines()
+            raise RuntimeError(
+                "qemu-img convert failed: "
+                f"{tail[-1] if tail else 'no error output'}"
+            )
+        return _upload_file_conn(
+            conn, spec.pool, f"{spec.name}.qcow2", dst, "qcow2"
+        )
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
 def svc_create_vm(spec: CreateSpec) -> None:
     if spec.location_url:
         svc_create_vm_from_url(spec)
@@ -139,8 +214,12 @@ def svc_create_vm(spec: CreateSpec) -> None:
 
         created_vol = None
         if spec.import_path:
-            disk_path = spec.import_path
-            disk_fmt = _detect_format(conn, disk_path)
+            if is_foreign_source(spec.import_path):
+                disk_path = _import_foreign(conn, spec)
+                disk_fmt = "qcow2"
+            else:
+                disk_path = spec.import_path
+                disk_fmt = _detect_format(conn, disk_path)
         else:
             pool = conn.storagePoolLookupByName(spec.pool)
             size = int(spec.disk_gb * 1024**3)

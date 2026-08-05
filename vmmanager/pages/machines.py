@@ -39,6 +39,7 @@ class MachinesPage(QWidget):
     new_vm = Signal()
     restore_file = Signal()
     import_backup = Signal()
+    restore_backup = Signal()
     bulk_action = Signal(list, str)  # uuids, op
     health_updated = Signal(str, str, float)  # uuid, mountpoint, used %
 
@@ -357,6 +358,7 @@ class MachinesPage(QWidget):
 
         menu = QMenu(self)
         menu.addAction("Import backup folder…", self.import_backup.emit)
+        menu.addAction("Restore incremental backup…", self.restore_backup.emit)
         menu.addAction("Restore state from .vmstate file…", self.restore_file.emit)
         menu.exec(anchor.mapToGlobal(anchor.rect().bottomLeft()))
 

@@ -109,6 +109,21 @@ installs it under `~/.local/share/applications`, and rebuilds your menu's cache.
 Run it again after changing the desktop file - your menu reads a cache, not the
 file.
 
+## Schedules while the app is closed
+
+Scheduled snapshots and power schedules normally run inside the app. To have
+them fire around the clock, install the scheduler service as a user unit:
+
+```sh
+cp packaging/vmmanager-scheduler.service ~/.config/systemd/user/
+systemctl --user enable --now vmmanager-scheduler
+```
+
+It is `vmmanager --daemon` under the hood - the same schedules, the same
+database, no window. The app notices it running and stands its own timers
+down, so nothing fires twice. To keep it alive while logged out:
+`loginctl enable-linger $USER`.
+
 ## Where it keeps things
 
 | Path | What |

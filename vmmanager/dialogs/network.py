@@ -321,3 +321,153 @@ class NetworkDetailsDialog(SizedDialog):
             ipv6_dhcp=self.ipv6_dhcp.isChecked(),
             portgroups=tuple(groups),
         )
+
+
+class NwFiltersDialog(SizedDialog):
+    """libvirt's network filters: list, edit, define, delete.
+
+    Filters are per-connection, not per-network, which is why they open
+    from the page header rather than from a card.
+    """
+
+    def __init__(self, parent) -> None:
+        super().__init__(parent)
+        from PySide6.QtWidgets import QPlainTextEdit
+
+        from ..libvirt_service import nwfilter_template
+        from ..syntax import XmlHighlighter
+        from ..tasks import run_task as _run
+
+        self._run = _run
+        self._template = nwfilter_template
+        self.setWindowTitle("Network filters")
+        self.setMinimumSize(760, 520)
+        box = QVBoxLayout(self)
+        box.setContentsMargins(24, 22, 24, 20)
+        box.setSpacing(10)
+        box.addWidget(_title("Network filters"))
+        note = QLabel(
+            "A filter is firewall rules a NIC opts into - assign one from the "
+            "interface's editor on the Hardware tab. clean-traffic and the "
+            "other no- filters ship with libvirt; filters can include each "
+            "other by reference."
+        )
+        note.setWordWrap(True)
+        note.setProperty("class", "Dim")
+        box.addWidget(note)
+
+        split = QHBoxLayout()
+        split.setSpacing(12)
+        self.filter_list = QListWidget()
+        self.filter_list.setMaximumWidth(280)
+        self.filter_list.currentTextChanged.connect(self._load_filter)
+        split.addWidget(self.filter_list)
+        self.editor = QPlainTextEdit()
+        self._highlighter = XmlHighlighter(self.editor.document())
+        split.addWidget(self.editor, 1)
+        box.addLayout(split, 1)
+
+        self.status = QLabel("")
+        self.status.setObjectName("ConsoleHint")
+        self.status.setWordWrap(True)
+        box.addWidget(self.status)
+
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        new_btn = QPushButton("New filter")
+        new_btn.setProperty("class", "GhostButton")
+        new_btn.clicked.connect(self._new_filter)
+        row.addWidget(new_btn)
+        delete_btn = QPushButton("Delete")
+        delete_btn.setProperty("class", "GhostButton")
+        delete_btn.clicked.connect(self._delete_filter)
+        row.addWidget(delete_btn)
+        row.addStretch(1)
+        save_btn = QPushButton("Save filter")
+        save_btn.setProperty("class", "PrimaryButton")
+        save_btn.clicked.connect(self._save_filter)
+        row.addWidget(save_btn)
+        close_btn = QPushButton("Close")
+        close_btn.setProperty("class", "GhostButton")
+        close_btn.clicked.connect(self.accept)
+        row.addWidget(close_btn)
+        box.addLayout(row)
+
+        self._reload()
+
+    def _reload(self, select: str | None = None) -> None:
+        from ..libvirt_service import svc_list_nwfilters
+
+        def apply(filters) -> None:
+            self.filter_list.blockSignals(True)
+            self.filter_list.clear()
+            for f in filters:
+                extra = f" + {', '.join(f.refs)}" if f.refs else ""
+                self.filter_list.addItem(f.name)
+                item = self.filter_list.item(self.filter_list.count() - 1)
+                item.setToolTip(
+                    f"chain {f.chain or 'root'} · {f.rules} rule(s){extra}"
+                )
+            self.filter_list.blockSignals(False)
+            if select:
+                matches = self.filter_list.findItems(
+                    select, Qt.MatchFlag.MatchExactly
+                )
+                if matches:
+                    self.filter_list.setCurrentItem(matches[0])
+
+        def failed(message: str) -> None:
+            self.status.setText(
+                "This connection has no network-filter support - the qemu "
+                f"system driver does. ({message})"
+            )
+
+        self._run(svc_list_nwfilters, done=apply, failed=failed)
+
+    def _load_filter(self, name: str) -> None:
+        if not name:
+            return
+        from ..libvirt_service import svc_get_nwfilter_xml
+
+        self._run(
+            lambda: svc_get_nwfilter_xml(name),
+            done=self.editor.setPlainText,
+            failed=self.status.setText,
+        )
+
+    def _new_filter(self) -> None:
+        self.filter_list.setCurrentItem(None)
+        self.editor.setPlainText(self._template("my-filter"))
+        self.status.setText(
+            "edit the name and rules, then Save filter defines it"
+        )
+
+    def _save_filter(self) -> None:
+        from ..libvirt_service import svc_define_nwfilter
+
+        xml = self.editor.toPlainText()
+        self._run(
+            lambda: svc_define_nwfilter(xml),
+            done=lambda name: (
+                self.status.setText(f"saved '{name}'"),
+                self._reload(select=name),
+            ),
+            failed=lambda m: self.status.setText(f"refused: {m}"),
+        )
+
+    def _delete_filter(self) -> None:
+        item = self.filter_list.currentItem()
+        if item is None:
+            return
+        from ..libvirt_service import svc_delete_nwfilter
+
+        name = item.text()
+        self._run(
+            lambda: svc_delete_nwfilter(name),
+            done=lambda _: (
+                self.editor.clear(),
+                self.status.setText(f"deleted '{name}'"),
+                self._reload(),
+            ),
+            failed=lambda m: self.status.setText(str(m)),
+        )

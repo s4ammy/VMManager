@@ -53,4 +53,6 @@ package() {
   install -Dm644 vmmanager/assets/icon.svg \
     "$pkgdir/usr/share/icons/hicolor/scalable/apps/$pkgname.svg"
   install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+  install -Dm644 packaging/vmmanager-scheduler.service \
+    "$pkgdir/usr/lib/systemd/user/vmmanager-scheduler.service"
 }

@@ -6,7 +6,7 @@
 .venv/bin/python -m pytest -q
 ```
 
-514 tests, about 8 seconds, no display needed. They run against libvirt's own
+654 tests, about 10 seconds, no display needed. They run against libvirt's own
 fake hypervisor (`test:///default`), so they exercise the real service functions
 with real libvirt semantics and never touch a real machine. They also stay out of
 your own data - the stats database is redirected to a temporary one.
@@ -41,6 +41,15 @@ test that cannot fail is worse than no test.
 | `test_tuning.py` | CPU pinning against a real host topology, hugepages, disk limits |
 | `test_features.py` | Hyper-V enlightenments read from host capabilities rather than a list |
 | `test_helpers.py` | ssh URI parsing, palette matching, the stats store, the wrapping row layout |
+| `test_backup_restore.py` | the chain walk from any backup to its full run, and that rebuilding only ever writes copies |
+| `test_move_disk.py` | every way a disk move refuses to start (the copy itself needs real libvirt) |
+| `test_vencrypt.py` | VeNCrypt subtype choice and when TLS is preferred, through a real QSslSocket with fake I/O |
+| `test_convert.py` | OVF parsed as producers actually write it, OVA unpacking, qemu-img argv |
+| `test_mdev.py` | mdev types and SR-IOV read from a fake /sys, node-device XML both ways |
+| `test_nwfilter.py` | the per-NIC filterref edit, and no-support answering as no filters |
+| `test_scheduler.py` | schedule decisions shared by app and daemon, and the heartbeat handshake |
+| `test_usb_rules.py` | the auto-attach plan, including never stealing a device from another guest |
+| `test_console_drop.py` | dropped-file mime handling and per-OS guest destinations |
 
 Coverage is 59% of statements. The rest is mostly Qt wiring, where a unit test
 asserts little; what is covered is the code that fails silently.

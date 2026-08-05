@@ -13,7 +13,13 @@ import zlib
 
 from PySide6.QtCore import QPoint, QRect, Qt, QTimer, Signal
 from PySide6.QtGui import QImage, QPainter
-from PySide6.QtNetwork import QAbstractSocket, QLocalSocket, QTcpSocket
+from PySide6.QtNetwork import (
+    QAbstractSocket,
+    QLocalSocket,
+    QSslCertificate,
+    QSslSocket,
+    QTcpSocket,
+)
 from PySide6.QtWidgets import QApplication, QWidget
 
 from .. import theme
@@ -226,7 +232,9 @@ class VncClient(QWidget):
     def open_tcp(self, host: str, port: int, password: str = "") -> None:
         self.close_connection()
         self._password = password
-        sock = QTcpSocket(self)
+        # A QSslSocket behaves as a plain TCP socket until VeNCrypt asks for
+        # encryption mid-handshake - which is the only way RFB does TLS.
+        sock = QSslSocket(self)
         self._sock = sock
         # Nagle's algorithm holds a small write back waiting for company. Every
         # keystroke and pointer move here is a small write, and the delay it
@@ -351,7 +359,19 @@ class VncClient(QWidget):
 
     def _on_sec_types(self, data: bytes) -> None:
         types = set(data)
-        if 1 in types:
+        tls_possible = (
+            19 in types
+            and isinstance(self._sock, QSslSocket)
+            and QSslSocket.supportsSsl()
+        )
+        prefer_tls = False
+        if tls_possible:
+            from ..pages.settings import console_tls
+
+            prefer_tls = console_tls()
+        if tls_possible and (prefer_tls or not types & {1, 2}):
+            self._start_vencrypt()
+        elif 1 in types:
             self._send(bytes([1]))
             self._expect(4, self._on_sec_result)
         elif 2 in types:
@@ -361,10 +381,104 @@ class VncClient(QWidget):
                 return
             self._send(bytes([2]))
             self._expect(16, lambda ch: self._answer_challenge(ch))
+        elif 19 in types:
+            self._fail("server requires TLS and this Qt build has no SSL")
         else:
             self._fail(
-                "server offers no supported auth (needs None or VNC password)"
+                "server offers no supported auth (needs None, VNC password "
+                "or VeNCrypt)"
             )
+
+    # -- VeNCrypt (RFB security type 19): a version/subtype negotiation and
+    # then TLS on the same socket, with plain None/VNC auth inside the tunnel.
+
+    # subtypes we can do, most preferred first: x509 verifies the server,
+    # and the *None variants skip the password prompt. The anonymous-DH
+    # tls* subtypes need ciphers OpenSSL disables by default, so they are
+    # last resorts and will usually fail the handshake with older servers.
+    _VENCRYPT_PICKS = (260, 261, 257, 258)  # x509none, x509vnc, tlsnone, tlsvnc
+
+    def _start_vencrypt(self) -> None:
+        self._send(bytes([19]))
+        self._expect(2, self._on_vencrypt_version)
+
+    def _on_vencrypt_version(self, data: bytes) -> None:
+        if (data[0], data[1]) < (0, 2):
+            self._fail(f"server VeNCrypt {data[0]}.{data[1]} is too old")
+            return
+        self._send(bytes([0, 2]))
+        self._expect(1, self._on_vencrypt_version_ack)
+
+    def _on_vencrypt_version_ack(self, data: bytes) -> None:
+        if data[0] != 0:
+            self._fail("server refused VeNCrypt 0.2")
+            return
+        self._expect(1, self._on_vencrypt_count)
+
+    def _on_vencrypt_count(self, data: bytes) -> None:
+        if data[0] == 0:
+            self._fail("server offers no VeNCrypt subtypes")
+            return
+        self._expect(4 * data[0], self._on_vencrypt_subtypes)
+
+    def _on_vencrypt_subtypes(self, data: bytes) -> None:
+        offered = set(struct.unpack(f">{len(data) // 4}I", data))
+        pick = next((s for s in self._VENCRYPT_PICKS if s in offered), None)
+        if pick is None:
+            self._fail(
+                "no VeNCrypt subtype in common (server offers "
+                f"{sorted(offered)}; plain-text subtypes are not supported)"
+            )
+            return
+        self._vencrypt_sub = pick
+        self._send(struct.pack(">I", pick))
+        self._expect(1, self._on_vencrypt_go)
+
+    def _on_vencrypt_go(self, data: bytes) -> None:
+        if data[0] != 1:
+            self._fail("server refused the chosen VeNCrypt subtype")
+            return
+        self._start_tls()
+
+    def _start_tls(self) -> None:
+        from ..pages.settings import console_tls_ca, console_tls_no_verify
+
+        sock = self._sock
+        assert isinstance(sock, QSslSocket)
+        conf = sock.sslConfiguration()
+        ca_path = console_tls_ca()
+        if ca_path:
+            extra = QSslCertificate.fromPath(ca_path)
+            if not extra:
+                self._fail(f"no certificate could be read from {ca_path}")
+                return
+            conf.setCaCertificates(list(conf.caCertificates()) + list(extra))
+        if console_tls_no_verify():
+            conf.setPeerVerifyMode(QSslSocket.PeerVerifyMode.VerifyNone)
+        sock.setSslConfiguration(conf)
+        sock.encrypted.connect(self._on_tls_established)
+        sock.sslErrors.connect(self._on_ssl_errors)
+        sock.startClientEncryption()
+
+    def _on_ssl_errors(self, errors) -> None:
+        # VerifyNone never gets here; otherwise say what failed and where
+        # the fix lives, because "handshake failed" alone sends people off
+        # to the server logs for a client-side problem.
+        detail = "; ".join(e.errorString() for e in errors) or "TLS error"
+        self._fail(
+            f"{detail} - point Settings → Console at the server's CA "
+            "certificate, or allow unverified certificates there"
+        )
+
+    def _on_tls_established(self) -> None:
+        if self._vencrypt_sub in (257, 260):  # *None: straight to the result
+            self._expect(4, self._on_sec_result)
+        else:  # *Vnc: the classic challenge, now inside the tunnel
+            if not self._password:
+                self.close_connection()
+                self.password_required.emit()
+                return
+            self._expect(16, lambda ch: self._answer_challenge(ch))
 
     def _answer_challenge(self, challenge: bytes, result_then_init: bool = False) -> None:
         self._send(vnc_auth_response(self._password, challenge))

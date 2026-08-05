@@ -446,6 +446,140 @@ class DiskCacheDialog(SizedDialog):
         box.addSpacing(6)
         box.addLayout(_buttons(self, "Apply"))
 
+class MdevDialog(SizedDialog):
+    """Mediated devices: the types this host offers, the instances that
+    exist, and which one to hand to the machine.
+
+    Selection is an instance; the type list is where new ones are created.
+    """
+
+    def __init__(self, parent, types, mdevs) -> None:
+        # types: list[MdevType], mdevs: list[MdevInfo]
+        super().__init__(parent)
+        self.setWindowTitle("Mediated devices")
+        self.setMinimumSize(680, 480)
+        self.create_requested = None  # set by the caller; (parent, type_id)
+        self.delete_requested = None  # set by the caller; (uuid)
+        box = QVBoxLayout(self)
+        box.setContentsMargins(24, 22, 24, 20)
+        box.setSpacing(10)
+        box.addWidget(_title("Mediated devices"))
+        if not types and not mdevs:
+            note = QLabel(
+                "This host advertises no mediated-device types. They come "
+                "from the graphics driver - NVIDIA vGPU (the enterprise "
+                "driver), Intel GVT-g - and appear under /sys/class/mdev_bus "
+                "once that driver is set up."
+            )
+            note.setWordWrap(True)
+            note.setProperty("class", "Dim")
+            box.addWidget(note)
+        else:
+            note = QLabel(
+                "An instance is assigned like a PCI device. Instances made "
+                "here are transient - gone after a host reboot; mdevctl can "
+                "persist them."
+            )
+            note.setWordWrap(True)
+            note.setProperty("class", "Dim")
+            box.addWidget(note)
+
+        box.addWidget(_field_label("types this host offers"))
+        self.type_list = QListWidget()
+        self.type_list.setMaximumHeight(140)
+        box.addWidget(self.type_list)
+        create_btn = QPushButton("Create instance of selected type")
+        create_btn.setProperty("class", "GhostButton")
+        create_btn.clicked.connect(self._create)
+        box.addWidget(create_btn, alignment=Qt.AlignmentFlag.AlignLeft)
+
+        box.addWidget(_field_label("instances"))
+        self.mdev_list = QListWidget()
+        box.addWidget(self.mdev_list, 1)
+        delete_btn = QPushButton("Delete selected instance")
+        delete_btn.setProperty("class", "GhostButton")
+        delete_btn.clicked.connect(self._delete)
+        box.addWidget(delete_btn, alignment=Qt.AlignmentFlag.AlignLeft)
+
+        self.status = QLabel("")
+        self.status.setObjectName("ConsoleHint")
+        self.status.setWordWrap(True)
+        box.addWidget(self.status)
+
+        box.addSpacing(6)
+        box.addLayout(_buttons(self, "Attach to machine"))
+        self.populate(types, mdevs)
+
+    def populate(self, types, mdevs) -> None:
+        self.type_list.clear()
+        for t in types:
+            item = QListWidgetItem(
+                f"{t.type_id} - {t.name}  ({t.available} available, "
+                f"on {t.parent})"
+            )
+            item.setData(Qt.ItemDataRole.UserRole, t)
+            self.type_list.addItem(item)
+        self.mdev_list.clear()
+        for m in mdevs:
+            used = f" - assigned to {m.attached_to}" if m.attached_to else ""
+            item = QListWidgetItem(f"{m.uuid}  ({m.type_id} on {m.parent}){used}")
+            item.setData(Qt.ItemDataRole.UserRole, m)
+            self.mdev_list.addItem(item)
+
+    def _create(self) -> None:
+        item = self.type_list.currentItem()
+        if item is None or self.create_requested is None:
+            return
+        t = item.data(Qt.ItemDataRole.UserRole)
+        self.create_requested(t.parent, t.type_id)
+
+    def _delete(self) -> None:
+        item = self.mdev_list.currentItem()
+        if item is None or self.delete_requested is None:
+            return
+        m = item.data(Qt.ItemDataRole.UserRole)
+        self.delete_requested(m.uuid)
+
+    def chosen(self):
+        item = self.mdev_list.currentItem()
+        return item.data(Qt.ItemDataRole.UserRole) if item else None
+
+
+class MoveDiskDialog(SizedDialog):
+    """Pick the pool a disk's storage should move to."""
+
+    def __init__(self, parent, dev: str, pools, current_source: str,
+                 running: bool) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Move disk")
+        self.setMinimumWidth(440)
+        box = QVBoxLayout(self)
+        box.setContentsMargins(24, 22, 24, 20)
+        box.setSpacing(10)
+        box.addWidget(_title(f"Move {dev} to another pool"))
+        note = QLabel(
+            ("The disk is mirrored onto the new volume while the machine "
+             "runs, then switched over - no downtime."
+             if running else
+             "The volume is cloned into the chosen pool and the machine "
+             "pointed at the copy.")
+            + " A linked clone's disk is flattened by the move."
+        )
+        note.setWordWrap(True)
+        note.setProperty("class", "Dim")
+        box.addWidget(note)
+        box.addWidget(_field_label("destination pool"))
+        self.pool = QComboBox()
+        for p in pools:
+            if p.active and not (p.path and current_source.startswith(p.path + "/")):
+                self.pool.addItem(p.name)
+        box.addWidget(self.pool)
+        self.delete_source = QCheckBox("Delete the old volume once moved")
+        box.addWidget(self.delete_source)
+        box.addSpacing(6)
+        box.addLayout(_buttons(self, "Move"))
+
+
 class PassthroughDialog(SizedDialog):
     """IOMMU groups with a verdict per device - why passthrough will or won't
     work, which is the part everyone gets stuck on."""
@@ -503,7 +637,8 @@ class PassthroughDialog(SizedDialog):
                 status, why = passthrough_verdict(report, dev)
                 if dev.is_bridge:
                     status = "bridge"
-                item = QTreeWidgetItem([dev.label, dev.address, dev.driver, status])
+                label = dev.label + (f"  ·  {dev.sriov}" if dev.sriov else "")
+                item = QTreeWidgetItem([label, dev.address, dev.driver, status])
                 item.setToolTip(0, why)
                 item.setToolTip(3, why)
                 colour = self.COLORS.get(status)
@@ -919,9 +1054,10 @@ class LabelsDialog(SizedDialog):
 
 
 class NicEditDialog(SizedDialog):
-    """Edit an existing interface: MAC, model, link state."""
+    """Edit an existing interface: MAC, model, link state, filter."""
 
-    def __init__(self, parent, nic, networks: list[str]) -> None:
+    def __init__(self, parent, nic, networks: list[str],
+                 filters: list[str] | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Edit network interface")
         self.setMinimumWidth(440)
@@ -948,8 +1084,32 @@ class NicEditDialog(SizedDialog):
         self.link_up = QCheckBox("Link connected")
         self.link_up.setChecked(True)
         box.addWidget(self.link_up)
+        self.filter = None
+        self.filter_ip = None
+        if filters:
+            box.addWidget(_field_label("network filter"))
+            self.filter = QComboBox()
+            self.filter.addItem("(none)")
+            self.filter.addItems(filters)
+            if nic.filter:
+                if nic.filter not in filters:
+                    self.filter.addItem(nic.filter)
+                self.filter.setCurrentText(nic.filter)
+            box.addWidget(self.filter)
+            self.filter_ip = QLineEdit()
+            self.filter_ip.setPlaceholderText(
+                "IP for the filter (optional) - clean-traffic pins the guest "
+                "to it"
+            )
+            box.addWidget(self.filter_ip)
         box.addSpacing(6)
         box.addLayout(_buttons(self, "Apply"))
+
+    def chosen_filter(self) -> str:
+        if self.filter is None:
+            return ""
+        text = self.filter.currentText()
+        return "" if text == "(none)" else text
 
 
 class HostdevOptionsDialog(SizedDialog):
