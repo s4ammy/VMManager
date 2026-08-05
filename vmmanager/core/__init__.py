@@ -25,6 +25,9 @@ from .modes import *  # noqa: F401,F403
 from .tuning import *  # noqa: F401,F403
 from .console import *  # noqa: F401,F403
 from .hostdev import *  # noqa: F401,F403
+from .elevate import *  # noqa: F401,F403
+from .vfio import *  # noqa: F401,F403
+from .hooks import *  # noqa: F401,F403
 from .mdev import *  # noqa: F401,F403
 from .domains import *  # noqa: F401,F403
 from .inspect import *  # noqa: F401,F403

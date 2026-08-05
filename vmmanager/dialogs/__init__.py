@@ -14,7 +14,7 @@ from .base import (  # noqa: F401
     _title,
 )
 from .console import VncPasswordDialog  # noqa: F401
-from .hardware import AttachDiskDialog, AttachNicDialog, BootOrderDialog, ChoiceDialog, CpuDialog, DiskCacheDialog, DisplayFixDialog, GuestFeaturesDialog, HostDeviceDialog, HostdevOptionsDialog, LabelsDialog, MdevDialog, MemoryDialog, MoveDiskDialog, NicEditDialog, PassthroughDialog, ShareFolderDialog, TuningDialog, VideoDialog, VirtioIsoDialog, WindowsToolingDialog  # noqa: F401
+from .hardware import AttachDiskDialog, AttachNicDialog, BootOrderDialog, ChoiceDialog, CpuDialog, DiskCacheDialog, DisplayFixDialog, GuestFeaturesDialog, HostDeviceDialog, HostdevOptionsDialog, LabelsDialog, MdevDialog, MemoryDialog, MoveDiskDialog, NicEditDialog, PassthroughDialog, ShareFolderDialog, SingleGpuDialog, TuningDialog, VideoDialog, VirtioIsoDialog, WindowsToolingDialog  # noqa: F401
 from .machine import CatalogDialog, CloneDetailsDialog, CloneDialog, ConnectionDialog, OsIconDialog, DeleteVmDialog, MigrateDialog, ModesDialog, ScheduleDialog, UsbRulesDialog, WakeScheduleDialog  # noqa: F401
 from .network import NetworkDetailsDialog, NetworkDialog, NwFiltersDialog  # noqa: F401
 from .snapshot import SnapshotDialog  # noqa: F401
@@ -41,6 +41,7 @@ __all__ = [
     "DeleteVmDialog",
     "DiskCacheDialog",
     "MdevDialog",
+    "SingleGpuDialog",
     "MoveDiskDialog",
     "DisplayFixDialog",
     "ErrorDialog",

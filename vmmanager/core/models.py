@@ -95,8 +95,12 @@ class NwFilterInfo:
 
 @dataclass(frozen=True)
 class HostdevInfo:
-    kind: str  # usb | pci
-    ident: str  # usb: "vvvv:pppp", pci: "0000:03:00.0"
+    kind: str  # usb | pci | mdev
+    ident: str
+    # Read for the options dialog; out of the comparison because callers
+    # match devices on kind and ident alone.
+    rom_file: str = field(default="", compare=False)
+    rom_bar: bool = field(default=True, compare=False)  # usb: "vvvv:pppp", pci: "0000:03:00.0"
 
 @dataclass(frozen=True)
 class FsShareInfo:

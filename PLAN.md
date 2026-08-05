@@ -695,6 +695,57 @@ is still taken from the specification rather than measured.
   device already inside any guest - including one with no rule - is left
   alone. First rule wins when two machines claim one device.
 
+## Milestone 20 - gaming VMs (shipped)
+
+The passthrough features stopped where the pain starts: the app could tell
+you a card was blocked, and then leave the fixing to a wiki. Four things,
+all local-host only, all going through pkexec.
+
+- **vfio-pci binding** (`core/vfio.py`): bind now (driver_override, unbind,
+  drivers_probe), give back, or claim at boot with a modprobe.d file plus
+  softdeps and an initramfs rebuild - the step that makes the difference
+  between a config that works and one that is read too late. The whole card
+  moves, not the function that was selected, because an IOMMU group is
+  indivisible. `initramfs_command` recognises mkinitcpio/dracut/
+  update-initramfs and says so plainly when it recognises none.
+- **Video BIOS ROMs**: dump from sysfs (rom enable, read, disable, in one
+  elevated script because the attribute has to stay enabled across the read)
+  and trim to the legacy x86 image by walking the option ROM's own image
+  chain - 0x55 0xAA, the PCIR block at the offset in bytes 0x18-0x19, code
+  type 0 for x86 and 3 for EFI, the last-image bit. That is the hex-editor
+  step from every guide, done by the spec instead of by eye. A ROM naming a
+  different card warns; one with no x86 image is refused rather than handed
+  over broken. Tested against ROMs assembled byte by byte; not verified
+  against a real dump, which needs the card free of its driver.
+- **Single-GPU hooks** (`core/hooks.py`): generated for this host - display
+  manager read from the systemd symlink rather than guessed at (this host
+  runs plasmalogin, which no hardcoded list would have had), driver from
+  sysfs, every function of the card. Written under
+  /etc/libvirt/hooks/qemu.d/<machine>/, and an existing dispatcher of the
+  user's own is detected and left alone rather than overwritten. The audio
+  function's snd_hda_intel is deliberately not unloaded - it drives the
+  host's own sound cards, and libvirt's managed detach handles the one
+  device. Verified as valid bash, and the read-only parts (vtconsole name
+  matching, framebuffer driver paths) were run against this host's real
+  sysfs.
+- **CPU isolation**: AllowedCPUs on system.slice/user.slice/init.scope for
+  the duration, from the machine's own pinning, restored on release.
+  machine.slice is untouched, which is where the guest's qemu lives.
+  `host_cpuset` refuses to leave the host nothing - there would be nothing
+  left to run the undo with. Optional performance governor, offered only
+  where the host exposes one (this host exposes none, which is what turned
+  that from an assumption into a check).
+
+Everything that reaches a root command line goes through `core/elevate.py`:
+fixed script text, caller data as positional arguments, PCI addresses and
+machine names validated against patterns first. A machine called
+`../../etc/cron.d/x` cannot become a path.
+
+**Not verified here:** the hooks have not been run through a real single-GPU
+handoff - this host has two GPUs and a desktop the tests must not kill. The
+dialog says to try it the first time with ssh access from another machine,
+which is the honest advice.
+
 ## Known limits
 
 - SPICE password auth is supported; SASL is not, for either protocol.

@@ -129,3 +129,44 @@ class XmlHighlighter(ThemedHighlighter):
             self.setFormat(start, length, self._comment)
             m_next = self._comment_start.search(text, m_end.end())
             start = m_next.start() if m_next else -1
+
+
+class ShellHighlighter(ThemedHighlighter):
+    """Shell scripts: comments faint, keywords accent, strings warm.
+
+    Only enough of sh to read a generated hook at a glance - the point is
+    seeing the shape of what will run as root, not editing it here.
+    """
+
+    _KEYWORDS = (
+        "if", "then", "else", "elif", "fi", "for", "in", "do", "done",
+        "case", "esac", "while", "until", "function", "return", "exit",
+        "exec", "set", "local",
+    )
+
+    def __init__(self, document) -> None:
+        super().__init__(document)
+        self._comment = self._define("_comment", "TEXT_FAINT", italic=True)
+        self._keyword = self._define("_keyword", "ACCENT", bold=True)
+        self._string = self._define("_string", "WARN")
+        self._command = self._define("_command", "OK")
+        self._rules = [
+            (re.compile(
+                r"\b(" + "|".join(self._KEYWORDS) + r")\b"), 0, self._keyword),
+            # the commands a hook actually leans on, worth spotting
+            (re.compile(
+                r"\b(systemctl|modprobe|echo|cat|sleep|chmod|virsh)\b"),
+             0, self._command),
+            (re.compile(r"'[^']*'|\"[^\"]*\""), 0, self._string),
+        ]
+        self._comment_re = re.compile(r"#.*$")
+
+    def highlightBlock(self, text: str) -> None:  # noqa: N802 - Qt override
+        for pattern, group, fmt in self._rules:
+            for m in pattern.finditer(text):
+                start, end = m.span(group)
+                self.setFormat(start, end - start, fmt)
+        # a comment wins over anything matched inside it
+        m = self._comment_re.search(text)
+        if m:
+            self.setFormat(m.start(), len(text) - m.start(), self._comment)

@@ -20,6 +20,7 @@ import pytest
 import vmmanager.dialogs as dialogs
 
 PROJECT = Path(__file__).resolve().parent.parent
+from vmmanager.core.hooks import GpuHandoff, HookState
 from vmmanager.core.models import (
     DiskInfo,
     DisplayHealth,
@@ -100,6 +101,16 @@ ARGS = {
     "ResizeVolumeDialog": ("disk.qcow2", 2.0),
     "ScheduleDialog": ("web-01", None),
     "ShareFolderDialog": (),
+    "SingleGpuDialog": (
+        "win11",
+        [IommuDevice(address="0000:01:00.0", group=13, label="GPU",
+                     driver="nvidia", is_bridge=False, attached_to=None)],
+        GpuHandoff(vm_name="win11", addresses=("0000:01:00.0",),
+                   driver="nvidia", modules=("nvidia",),
+                   display_manager="sddm.service"),
+        HookState(),
+        True, True,
+    ),
     "SnapshotDialog": ("web-01",),
     "TuningDialog": "needs the host topology, built in its own test below",
     "VideoDialog": ("virtio",),

@@ -6,7 +6,7 @@
 .venv/bin/python -m pytest -q
 ```
 
-654 tests, about 10 seconds, no display needed. They run against libvirt's own
+701 tests, about 10 seconds, no display needed. They run against libvirt's own
 fake hypervisor (`test:///default`), so they exercise the real service functions
 with real libvirt semantics and never touch a real machine. They also stay out of
 your own data - the stats database is redirected to a temporary one.
@@ -50,6 +50,8 @@ test that cannot fail is worse than no test.
 | `test_scheduler.py` | schedule decisions shared by app and daemon, and the heartbeat handshake |
 | `test_usb_rules.py` | the auto-attach plan, including never stealing a device from another guest |
 | `test_console_drop.py` | dropped-file mime handling and per-OS guest destinations |
+| `test_vfio.py` | PCI addresses that must never reach a root command line, boot-binding files, and option-ROM parsing built to the spec byte by byte |
+| `test_hooks.py` | the generated single-GPU scripts: valid shell, undone in reverse, someone else's dispatcher untouched, and isolation that can never leave the host without a CPU |
 
 Coverage is 59% of statements. The rest is mostly Qt wiring, where a unit test
 asserts little; what is covered is the code that fails silently.

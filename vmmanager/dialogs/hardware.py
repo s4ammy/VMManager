@@ -590,8 +590,10 @@ class PassthroughDialog(SizedDialog):
         return {"ready": theme.OK, "caution": theme.WARN,
                 "blocked": theme.DANGER}
 
-    def __init__(self, parent, report) -> None:  # report: IommuReport
+    def __init__(self, parent, report, persisted: list[str] | None = None,
+                 iommu_hint: str = "") -> None:  # report: IommuReport
         super().__init__(parent)
+        persisted = persisted or []
         self.setWindowTitle("PCI passthrough diagnostics")
         self.setMinimumSize(760, 560)
         from PySide6.QtWidgets import QTreeWidget, QTreeWidgetItem
@@ -605,8 +607,9 @@ class PassthroughDialog(SizedDialog):
         if not report.enabled:
             warn = QLabel(
                 "IOMMU is not enabled on this host. Turn on VT-d (Intel) or "
-                "AMD-Vi in firmware, then add intel_iommu=on or amd_iommu=on "
-                "to the kernel command line and reboot."
+                "AMD-Vi in firmware, then put this on the kernel command "
+                "line:\n\n" + (iommu_hint or
+                               "intel_iommu=on (or amd_iommu=on) iommu=pt")
             )
             warn.setWordWrap(True)
             warn.setStyleSheet(f"color: {self.COLORS['blocked']};")
@@ -674,13 +677,80 @@ class PassthroughDialog(SizedDialog):
             )
 
         tree.itemSelectionChanged.connect(on_select)
+        self._tree = tree
+
+        # The diagnostics used to stop at the verdict, which left the fix -
+        # binding, and making it survive a reboot - as an exercise.
+        self.status = QLabel("")
+        self.status.setObjectName("ConsoleHint")
+        self.status.setProperty("class", "Accent")
+        self.status.setWordWrap(True)
+        box.addWidget(self.status)
+
+        # set by the caller; each takes the selected IommuDevice
+        self.bind_requested = None
+        self.restore_requested = None
+        self.persist_requested = None
+        self.unpersist_requested = None
+
         row = QHBoxLayout()
+        row.setSpacing(8)
+        self._bind_btn = QPushButton("Bind to vfio-pci")
+        self._bind_btn.setProperty("class", "GhostButton")
+        self._bind_btn.setToolTip(
+            "Takes the whole card - every function of it - off the host "
+            "driver now. Nothing on the host may be using it."
+        )
+        self._bind_btn.clicked.connect(
+            lambda: self._act(self.bind_requested)
+        )
+        row.addWidget(self._bind_btn)
+        restore = QPushButton("Give back to host")
+        restore.setProperty("class", "GhostButton")
+        restore.clicked.connect(lambda: self._act(self.restore_requested))
+        row.addWidget(restore)
+        persist = QPushButton("Bind at boot…")
+        persist.setProperty("class", "GhostButton")
+        persist.setToolTip(
+            "Claims the card for vfio-pci before the host's driver can, "
+            "which is the only thing that works for most GPUs. Writes a "
+            "modprobe.d file and rebuilds the initramfs."
+        )
+        persist.clicked.connect(lambda: self._act(self.persist_requested))
+        row.addWidget(persist)
+        self._unpersist = QPushButton("Stop binding at boot")
+        self._unpersist.setProperty("class", "GhostButton")
+        self._unpersist.clicked.connect(
+            lambda: self._act(self.unpersist_requested)
+        )
+        self._unpersist.setVisible(bool(persisted))
+        row.addWidget(self._unpersist)
         row.addStretch(1)
         close = QPushButton("Close")
         close.setProperty("class", "GhostButton")
         close.clicked.connect(self.accept)
         row.addWidget(close)
         box.addLayout(row)
+        if persisted:
+            self.status.setText(
+                "bound at boot already: " + ", ".join(persisted)
+            )
+        elif not report.enabled:
+            self.status.setText(iommu_hint)
+
+    def selected_device(self):
+        items = self._tree.selectedItems()
+        data = items[0].data(0, Qt.ItemDataRole.UserRole) if items else None
+        return data[0] if data else None
+
+    def _act(self, slot) -> None:
+        dev = self.selected_device()
+        if dev is None:
+            self.status.setText("select a device first")
+            return
+        if slot is not None:
+            slot(dev)
+
 
 class WindowsToolingDialog(SizedDialog):
     """Checklist for making a Windows guest behave like a first-class one."""
@@ -1127,6 +1197,9 @@ class HostdevOptionsDialog(SizedDialog):
         self.rombar.setChecked(True)
         self.policy = QComboBox()
         self.policy.addItems(["mandatory", "requisite", "optional"])
+        self.rom_file = QLineEdit(getattr(dev, "rom_file", ""))
+        self._ident = dev.ident
+        self.dump_requested = None  # set by the caller: (dest_path) -> None
         if dev.kind == "pci":
             hint = QLabel(
                 "Turn the ROM off when a passed-through GPU's video BIOS stops "
@@ -1135,7 +1208,37 @@ class HostdevOptionsDialog(SizedDialog):
             hint.setWordWrap(True)
             hint.setProperty("class", "Dim")
             box.addWidget(hint)
+            self.rombar.setChecked(getattr(dev, "rom_bar", True))
             box.addWidget(self.rombar)
+            box.addSpacing(6)
+            box.addWidget(_field_label("video BIOS file"))
+            rom_hint = QLabel(
+                "Some cards - consumer NVIDIA especially - will not "
+                "initialise in a guest unless it is handed a copy of their "
+                "video BIOS. Dump reads it from the card and trims it to the "
+                "legacy image a guest looks for; the card must not be in use, "
+                "so do it with the machine shut down, ideally before the host "
+                "driver has claimed it."
+            )
+            rom_hint.setWordWrap(True)
+            rom_hint.setProperty("class", "Dim")
+            box.addWidget(rom_hint)
+            rom_row = QHBoxLayout()
+            rom_row.setSpacing(8)
+            rom_row.addWidget(self.rom_file, 1)
+            browse = QPushButton("Browse…")
+            browse.setProperty("class", "GhostButton")
+            browse.clicked.connect(self._browse_rom)
+            rom_row.addWidget(browse)
+            dump = QPushButton("Dump from card…")
+            dump.setProperty("class", "GhostButton")
+            dump.clicked.connect(self._dump_rom)
+            rom_row.addWidget(dump)
+            box.addLayout(rom_row)
+            self.rom_status = QLabel("")
+            self.rom_status.setObjectName("ConsoleHint")
+            self.rom_status.setWordWrap(True)
+            box.addWidget(self.rom_status)
         else:
             hint = QLabel(
                 "What happens when the device is missing at startup: mandatory "
@@ -1148,6 +1251,28 @@ class HostdevOptionsDialog(SizedDialog):
             box.addWidget(self.policy)
         box.addSpacing(6)
         box.addLayout(_buttons(self, "Apply"))
+
+    def _browse_rom(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Choose a video BIOS file", "",
+            "ROM images (*.rom *.bin);;All files (*)",
+        )
+        if path:
+            self.rom_file.setText(path)
+
+    def _dump_rom(self) -> None:
+        """Ask where to keep it, then let the caller do the privileged read."""
+        from pathlib import Path
+
+        default = str(Path.home() / f"{self._ident.replace(':', '_')}.rom")
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save the card's video BIOS as", default,
+            "ROM images (*.rom);;All files (*)",
+        )
+        if not path or self.dump_requested is None:
+            return
+        self.rom_status.setText("reading the card's ROM…")
+        self.dump_requested(path)
 
 
 class TuningDialog(SizedDialog):
@@ -1845,3 +1970,146 @@ class GuestFeaturesDialog(SizedDialog):
                 "Change the machine type first, in the processor editor."
             )
         return None
+
+
+class SingleGpuDialog(SizedDialog):
+    """Set up the hooks that hand the host's only graphics card over.
+
+    The work is a page of shell run as root at the moment the screen goes
+    dark, which is a terrible place to debug. So it is shown here in full
+    before anything is written, and the scripts stay editable afterwards.
+    """
+
+    def __init__(self, parent, vm_name: str, gpus, plan, state,
+                 governor_available: bool, pinned: bool) -> None:
+        # gpus: list[IommuDevice] (display class), plan: GpuHandoff,
+        # state: HookState
+        super().__init__(parent)
+        from PySide6.QtWidgets import QPlainTextEdit
+
+        self.setWindowTitle("Single-GPU passthrough")
+        self.setMinimumSize(760, 620)
+        self.install_requested = None  # (address, isolate, governor)
+        self.remove_requested = None
+        self.preview_requested = None  # (address, isolate, governor)
+        box = QVBoxLayout(self)
+        box.setContentsMargins(24, 22, 24, 20)
+        box.setSpacing(10)
+        box.addWidget(_title(f"Single-GPU passthrough for {vm_name}"))
+        note = QLabel(
+            "With one graphics card, the host has to let go of it before the "
+            "guest can have it: stop the desktop, take the consoles and the "
+            "boot framebuffer off the card, unload the driver - then all of "
+            "it backwards when the machine stops. These are libvirt hooks, so "
+            "they run whether or not this app is open."
+        )
+        note.setWordWrap(True)
+        note.setProperty("class", "Dim")
+        box.addWidget(note)
+
+        box.addWidget(_field_label("graphics card to hand over"))
+        self.gpu = QComboBox()
+        for dev in gpus:
+            self.gpu.addItem(f"{dev.label}  ({dev.address})", dev.address)
+        if plan is not None and plan.addresses:
+            index = self.gpu.findData(plan.addresses[0])
+            if index >= 0:
+                self.gpu.setCurrentIndex(index)
+        self.gpu.currentIndexChanged.connect(self._refresh)
+        box.addWidget(self.gpu)
+
+        self.isolate = QCheckBox(
+            "Keep the host's own work off this machine's pinned cores while "
+            "it runs"
+        )
+        self.isolate.setToolTip(
+            "systemd's AllowedCPUs on system.slice, user.slice and "
+            "init.scope. The guest's qemu lives in machine.slice and is left "
+            "alone. Undone when the machine stops."
+        )
+        self.isolate.setEnabled(pinned)
+        self.isolate.setChecked(pinned)
+        box.addWidget(self.isolate)
+        if not pinned:
+            pin_note = QLabel(
+                "CPU isolation needs the machine pinned first - Tuning, on "
+                "the hardware tab."
+            )
+            pin_note.setWordWrap(True)
+            pin_note.setObjectName("ConsoleHint")
+            box.addWidget(pin_note)
+
+        self.governor = QCheckBox(
+            "Put the host CPUs on the performance governor while it runs"
+        )
+        self.governor.setEnabled(governor_available)
+        if not governor_available:
+            self.governor.setToolTip(
+                "This host exposes no scaling governor, so there is nothing "
+                "to switch."
+            )
+        box.addWidget(self.governor)
+        self.isolate.toggled.connect(self._refresh)
+        self.governor.toggled.connect(self._refresh)
+
+        box.addWidget(_field_label("what will run before the machine starts"))
+        self.preview = QPlainTextEdit()
+        self.preview.setReadOnly(True)
+        from ..syntax import ShellHighlighter
+
+        self._highlighter = ShellHighlighter(self.preview.document())
+        box.addWidget(self.preview, 1)
+
+        self.status = QLabel("")
+        self.status.setObjectName("ConsoleHint")
+        self.status.setProperty("class", "Accent")
+        self.status.setWordWrap(True)
+        box.addWidget(self.status)
+        if state is not None and state.foreign_dispatcher:
+            self.status.setText(
+                "You already have your own /etc/libvirt/hooks/qemu - it will "
+                "be left alone, so make sure it runs the scripts in qemu.d/."
+            )
+
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        self._remove = QPushButton("Remove hooks")
+        self._remove.setProperty("class", "GhostButton")
+        self._remove.clicked.connect(
+            lambda: self.remove_requested and self.remove_requested()
+        )
+        self._remove.setVisible(bool(state and state.start_installed))
+        row.addWidget(self._remove)
+        row.addStretch(1)
+        cancel = QPushButton("Close")
+        cancel.setProperty("class", "GhostButton")
+        cancel.clicked.connect(self.reject)
+        row.addWidget(cancel)
+        install = QPushButton(
+            "Update hooks" if (state and state.start_installed)
+            else "Install hooks"
+        )
+        install.setProperty("class", "PrimaryButton")
+        install.clicked.connect(self._install)
+        row.addWidget(install)
+        box.addLayout(row)
+
+    def choices(self) -> tuple[str, bool, str]:
+        return (
+            self.gpu.currentData() or "",
+            self.isolate.isChecked() and self.isolate.isEnabled(),
+            "performance" if (
+                self.governor.isChecked() and self.governor.isEnabled()
+            ) else "",
+        )
+
+    def _refresh(self) -> None:
+        if self.preview_requested is not None:
+            self.preview_requested(*self.choices())
+
+    def show_preview(self, text: str) -> None:
+        self.preview.setPlainText(text)
+
+    def _install(self) -> None:
+        if self.install_requested is not None:
+            self.install_requested(*self.choices())

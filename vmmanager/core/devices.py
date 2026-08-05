@@ -957,8 +957,12 @@ def svc_set_boot_menu(uuid: str, enabled: bool, timeout_ms: int = 3000) -> str:
 def svc_set_hostdev_options(
     uuid: str, kind: str, ident: str,
     rombar: bool | None = None, startup_policy: str | None = None,
+    rom_file: str | None = None,
 ) -> str:
-    """ROM BAR visibility (PCI) and missing-device policy (USB)."""
+    """ROM BAR visibility, video BIOS file (PCI) and missing-device policy (USB).
+
+    `rom_file=""` clears the file and leaves the card's own ROM in play.
+    """
 
     def go(conn):
         dom = conn.lookupByUUIDString(uuid)
@@ -972,6 +976,14 @@ def svc_set_hostdev_options(
                 if rom is None:
                     rom = ET.SubElement(h, "rom")
                 rom.set("bar", "on" if rombar else "off")
+            if rom_file is not None:
+                rom = h.find("rom")
+                if rom is None:
+                    rom = ET.SubElement(h, "rom")
+                if rom_file:
+                    rom.set("file", rom_file)
+                elif "file" in rom.attrib:
+                    del rom.attrib["file"]
             if startup_policy:
                 source = h.find("source")
                 if source is not None:

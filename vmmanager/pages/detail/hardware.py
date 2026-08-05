@@ -718,6 +718,7 @@ class HardwareMixin:
         menu.addAction("Host device (USB / PCI)…", self._add_hostdev)
         menu.addAction("Mediated device (vGPU)…", self._add_mdev)
         menu.addAction("Check PCI passthrough…", self._passthrough_check)
+        menu.addAction("Single-GPU passthrough…", self._single_gpu_setup)
         other = menu.addMenu("Other devices")
         if not self._hw.watchdog:
             other.addAction(
@@ -851,12 +852,209 @@ class HardwareMixin:
             ).exec()
             return
         self.hw_status.setText("reading IOMMU groups…")
+
+        def show(report) -> None:
+            self.hw_status.setText("")
+            dialog = PassthroughDialog(
+                self, report, persisted=persisted_ids(),
+                iommu_hint=iommu_advice(),
+            )
+
+            def done(message: str) -> None:
+                dialog.status.setText(str(message))
+
+            def failed(message: str) -> None:
+                dialog.status.setText(str(message))
+
+            def whole_card(dev) -> list[str]:
+                """Every function of the card, because a group moves together."""
+                return function_siblings(dev.address)
+
+            def bind(dev) -> None:
+                addresses = whole_card(dev)
+                if dev.attached_to:
+                    dialog.status.setText(
+                        f"{dev.address} is assigned to '{dev.attached_to}' - "
+                        "shut that machine down first"
+                    )
+                    return
+                dialog.status.setText(
+                    f"binding {', '.join(addresses)} to vfio-pci…"
+                )
+                run_task(
+                    lambda: svc_bind_vfio(addresses), done=done, failed=failed
+                )
+
+            def restore(dev) -> None:
+                addresses = whole_card(dev)
+                dialog.status.setText("handing back to the host…")
+                run_task(
+                    lambda: svc_restore_driver(addresses),
+                    done=done, failed=failed,
+                )
+
+            def persist(dev) -> None:
+                addresses = whole_card(dev)
+                idents = []
+                for address in addresses:
+                    ids = read_device_ids(address)
+                    if ids.vendor and ids.device:
+                        idents.append(ids.ident)
+                if not idents:
+                    dialog.status.setText("could not read the card's PCI ids")
+                    return
+                if not ConfirmDialog(
+                    dialog, "Bind at boot",
+                    "This writes /etc/modprobe.d/vmmanager-vfio.conf claiming "
+                    f"{', '.join(idents)} for vfio-pci, and rebuilds the "
+                    "initramfs so it is read early enough to matter.\n\n"
+                    "The host will not drive this card after the next reboot. "
+                    "On a single-GPU machine, set the passthrough hooks up "
+                    "first, or you will boot to a black screen.",
+                    "Write it",
+                ).exec() == QDialog.DialogCode.Accepted:
+                    return
+                dialog.status.setText("writing and rebuilding the initramfs…")
+                run_task(
+                    lambda: svc_persist_vfio(idents),
+                    done=lambda m: (
+                        done(m),
+                        dialog._unpersist.setVisible(True),
+                    ),
+                    failed=failed,
+                )
+
+            def unpersist(_dev) -> None:
+                dialog.status.setText("removing and rebuilding…")
+                run_task(
+                    lambda: svc_clear_persist_vfio(),
+                    done=lambda m: (
+                        done(m),
+                        dialog._unpersist.setVisible(False),
+                    ),
+                    failed=failed,
+                )
+
+            dialog.bind_requested = bind
+            dialog.restore_requested = restore
+            dialog.persist_requested = persist
+            dialog.unpersist_requested = unpersist
+            dialog.exec()
+
+        run_task(svc_iommu_report, done=show, failed=self._hw_failed)
+
+    def _single_gpu_setup(self) -> None:
+        """Write the libvirt hooks that hand this host's only card over."""
+        uuid = self.uuid
+        snap = self._snap
+        if not uuid or snap is None:
+            return
+        if is_remote_uri(current_uri()):
+            ErrorDialog(
+                self, "Local hosts only",
+                "The hooks are written to this host's /etc/libvirt/hooks, so "
+                "they can only be set up on a local connection.",
+            ).exec()
+            return
+        name = snap.name
+
+        def gather():
+            report = svc_iommu_report()
+            gpus = [
+                d for d in report.devices
+                if not d.is_bridge and read_device_ids(d.address).is_display
+            ]
+            return (
+                gpus,
+                svc_hook_state(name),
+                svc_get_tuning(uuid),
+                svc_host_topology(),
+            )
+
+        def show(data) -> None:
+            gpus, state, tuning, topology = data
+            if not gpus:
+                ErrorDialog(
+                    self, "No graphics card found",
+                    "No PCI display device turned up in this host's IOMMU "
+                    "groups, so there is nothing to hand over.",
+                ).exec()
+                return
+
+            def build(address: str, isolate: bool, governor: str):
+                return plan_handoff(
+                    name, address,
+                    tuning=tuning if isolate else None,
+                    topology=topology if isolate else None,
+                    governor=governor,
+                )
+
+            first = plan_handoff(name, gpus[0].address)
+            dialog = SingleGpuDialog(
+                self, name, gpus, first, state,
+                governor_available=governor_available(),
+                pinned=bool(tuning.vcpu_pins),
+            )
+
+            def preview(address: str, isolate: bool, governor: str) -> None:
+                if not address:
+                    return
+                try:
+                    dialog.show_preview(
+                        start_script(build(address, isolate, governor))
+                    )
+                except Exception as e:  # noqa: BLE001 - shown, not raised
+                    # a pinning that leaves the host nothing lands here
+                    dialog.show_preview(f"# cannot plan this: {e}")
+
+            def install(address: str, isolate: bool, governor: str) -> None:
+                try:
+                    plan = build(address, isolate, governor)
+                except Exception as e:  # noqa: BLE001
+                    dialog.status.setText(str(e))
+                    return
+                if not ConfirmDialog(
+                    dialog, "Install the passthrough hooks",
+                    f"This writes two scripts under /etc/libvirt/hooks for "
+                    f"'{name}' and asks for your password.\n\n"
+                    "From then on, starting this machine takes your desktop "
+                    "down and gives the card to the guest; stopping it brings "
+                    "the desktop back. Try it with a way to reach the host "
+                    "that does not need the screen - ssh from another "
+                    "machine - the first time.",
+                    "Install",
+                ).exec() == QDialog.DialogCode.Accepted:
+                    return
+                dialog.status.setText("writing the hooks…")
+                run_task(
+                    lambda: svc_install_hooks(plan),
+                    done=lambda m: (
+                        dialog.status.setText(str(m)),
+                        dialog._remove.setVisible(True),
+                    ),
+                    failed=lambda m: dialog.status.setText(str(m)),
+                )
+
+            def remove() -> None:
+                run_task(
+                    lambda: svc_remove_hooks(name),
+                    done=lambda m: (
+                        dialog.status.setText(str(m)),
+                        dialog._remove.setVisible(False),
+                    ),
+                    failed=lambda m: dialog.status.setText(str(m)),
+                )
+
+            dialog.preview_requested = preview
+            dialog.install_requested = install
+            dialog.remove_requested = remove
+            preview(*dialog.choices())
+            dialog.exec()
+
+        self.hw_status.setText("reading this host's graphics devices…")
         run_task(
-            svc_iommu_report,
-            done=lambda report: (
-                self.hw_status.setText(""),
-                PassthroughDialog(self, report).exec(),
-            ),
+            gather,
+            done=lambda data: (self.hw_status.setText(""), show(data)),
             failed=self._hw_failed,
         )
 
@@ -1658,13 +1856,49 @@ class HardwareMixin:
         if not uuid:
             return
         dialog = HostdevOptionsDialog(self, dev)
+
+        def dump(dest: str) -> None:
+            """Read the card's ROM as root, then trim it to the legacy image."""
+            def work():
+                message = svc_dump_rom(dev.ident, dest)
+                with open(dest, "rb") as f:
+                    data = f.read()
+                trimmed = trim_rom_to_legacy(data)
+                note = ""
+                if trimmed != data:
+                    with open(dest, "wb") as f:
+                        f.write(trimmed)
+                    note = (
+                        f" · trimmed to its {len(trimmed) // 1024} KB legacy "
+                        "image"
+                    )
+                ids = read_device_ids(dev.ident)
+                if not rom_matches_device(trimmed, ids):
+                    note += (
+                        f" · warning: the ROM does not name {ids.ident}, so "
+                        "it may belong to another card"
+                    )
+                return message + note
+
+            run_task(
+                work,
+                done=lambda msg: (
+                    dialog.rom_file.setText(dest),
+                    dialog.rom_status.setText(str(msg)),
+                ),
+                failed=lambda m: dialog.rom_status.setText(str(m)),
+            )
+
+        dialog.dump_requested = dump
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         rombar = dialog.rombar.isChecked() if dev.kind == "pci" else None
         policy = dialog.policy.currentText() if dev.kind == "usb" else None
+        rom_file = dialog.rom_file.text().strip() if dev.kind == "pci" else None
         self._hw_run(
             lambda: svc_set_hostdev_options(
-                uuid, dev.kind, dev.ident, rombar=rombar, startup_policy=policy
+                uuid, dev.kind, dev.ident, rombar=rombar,
+                startup_policy=policy, rom_file=rom_file,
             )
         )
 

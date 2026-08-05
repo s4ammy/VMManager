@@ -6,6 +6,7 @@ it, see [INSTALL.md](INSTALL.md).
 - [The machine list](#the-machine-list)
 - [Inside a machine](#inside-a-machine)
 - [Hardware and tuning](#hardware-and-tuning)
+- [Single-GPU passthrough](#single-gpu-passthrough)
 - [Modes](#modes)
 - [Making machines](#making-machines)
 - [Templates, clones and stacks](#templates-clones-and-stacks)
@@ -153,6 +154,60 @@ Where libvirt insists on a dependency, it is handled for you - turning on
 bound to, and a plain verdict on whether passthrough will work and why not.
 SR-IOV devices are annotated - a physical function shows how many VFs are
 enabled, a virtual function names its parent.
+
+And then **fix it**, rather than leaving the fix as an exercise:
+
+- **Bind to vfio-pci now** - the whole card, every function of it, off the
+  host driver without a reboot. Works when nothing on the host is using it.
+- **Bind at boot** - a GPU the host driver claims first usually cannot be
+  taken back, so this writes a modprobe.d file claiming it for vfio-pci and
+  rebuilds the initramfs, which is the step everyone forgets. Reversible from
+  the same dialog.
+- **Give it back** to whatever normally drives it.
+- The **IOMMU-off message names the exact kernel parameter** for this host -
+  `amd_iommu=on` or `intel_iommu=on` - and where its bootloader keeps the
+  command line.
+
+**Video BIOS files.** Some cards, consumer NVIDIA especially, will not
+initialise in a guest unless it is handed a copy of their video BIOS. The
+host-device options can point at a ROM file, or **dump it from the card** and
+trim it to the legacy image a guest looks for - the hex-editor step from every
+passthrough guide, done by walking the ROM's own image table. A ROM that names
+a different card is pointed out; one with no legacy image at all is refused
+rather than handed over broken.
+
+## Single-GPU passthrough
+
+Handing over the *only* graphics card means the host has to let go of it
+first: stop the desktop, take the virtual consoles and the boot framebuffer
+off it, unload the driver - then all of that backwards when the machine stops.
+That is a page of shell everybody copies from the same few gists and debugs
+with the screen turned off.
+
+*Install hardware → Single-GPU passthrough…* writes it, for this host: its
+display manager (read from systemd, not guessed), its driver, its card and
+every function on that card. The script is shown in full before anything is
+written, and stays yours to edit afterwards.
+
+- They are **libvirt hooks**, so they run whether or not this app is open.
+- They go under `/etc/libvirt/hooks/qemu.d/<machine>/`, beside anyone else's.
+  An existing `/etc/libvirt/hooks/qemu` of your own is **never overwritten** -
+  it says so and leaves it alone.
+- The audio function's driver is deliberately left loaded: `snd_hda_intel`
+  drives the host's own sound cards too, and libvirt's managed detach unbinds
+  the one device without silencing everything.
+- Everything is logged to the journal - `journalctl -t vmmanager-hook` - since
+  there is no screen to print to at the time.
+
+**CPU isolation, while the machine runs.** Pinning stops the guest wandering
+across cores; it does not stop the *host* scheduling its own work onto the
+cores the guest is pinned to, which is what is left of the stutter. The hooks
+can set systemd's `AllowedCPUs` on `system.slice`, `user.slice` and
+`init.scope` to everything the guest is not using, and hand it all back
+afterwards. The guest's own qemu lives in `machine.slice` and is left alone.
+A pinning that would leave the host no CPUs at all is refused, since nothing
+would be left to run the undo. Optionally the performance governor too, where
+the host has one to switch.
 
 **Mediated devices (vGPU)** - the types the host's driver advertises (NVIDIA
 vGPU, Intel GVT-g), instances created and deleted through libvirt's

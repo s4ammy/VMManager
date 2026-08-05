@@ -52,7 +52,14 @@ changed, and restore it if you want it back.
 - **Themes.** Colours, corner radii and fonts in a file you can edit in the app.
 - **Guest features** people normally paste into raw XML: Hyper-V
   enlightenments, KVM hiding, Looking Glass, evdev passthrough, secure boot.
-- **Passthrough diagnostics** that say why a device will or will not work.
+- **Passthrough diagnostics** that say why a device will or will not work -
+  and the fixes: bind to vfio-pci now or at boot, dump and trim a card's
+  video BIOS, the exact IOMMU kernel parameter for your host.
+- **Single-GPU passthrough set up for you.** The libvirt hooks that stop your
+  desktop, free the card and put it all back, generated for this host's
+  display manager and driver - shown in full before they are written.
+- **CPU isolation while a machine runs**, so the host stops scheduling its own
+  work onto the cores the guest is pinned to.
 
 Plus a command palette, scheduled snapshots and power schedules (with a
 background service so they fire while the app is closed), live disk moves
@@ -68,7 +75,7 @@ the interface. [Details](INSTALL.md#what-it-needs).
 
 ## Contributing
 
-`.venv/bin/python -m pytest -q` runs 654 tests in about 10 seconds against
+`.venv/bin/python -m pytest -q` runs 701 tests in about 10 seconds against
 libvirt's fake hypervisor - no real machines involved, no display needed.
 **[DEVELOPING.md](DEVELOPING.md)** covers how the code is arranged, what the
 tests are for, and the rules they enforce.

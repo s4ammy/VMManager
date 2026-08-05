@@ -25,12 +25,15 @@ def _hostdev_ident(h: ET.Element) -> HostdevInfo | None:
         a = src.find("address")
         if a is None:
             return None
+        rom = h.find("rom")
         return HostdevInfo(
             kind="pci",
             ident=(
                 f"{int(a.get('domain', '0'), 16):04x}:{int(a.get('bus', '0'), 16):02x}:"
                 f"{int(a.get('slot', '0'), 16):02x}.{int(a.get('function', '0'), 16):x}"
             ),
+            rom_file=rom.get("file", "") if rom is not None else "",
+            rom_bar=(rom.get("bar", "on") != "off") if rom is not None else True,
         )
     if kind == "mdev":
         a = src.find("address")
