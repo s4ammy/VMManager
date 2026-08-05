@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=VMManager
+GenericName=Virtual Machine Manager
+Comment=Manage libvirt/QEMU virtual machines
+Exec=vmmanager
+Icon=vmmanager
+Terminal=false
+Categories=System;Emulator;
+Keywords=virtual;machine;vm;libvirt;qemu;kvm;
+StartupWMClass=vmmanager

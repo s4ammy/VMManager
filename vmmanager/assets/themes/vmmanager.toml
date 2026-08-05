@@ -1,0 +1,27 @@
+# A vmmanager theme. Edit it here or in the app's Themes page.
+name = "VMManager"
+
+[colors]
+bg = "#1e1e1e"
+bg_raised = "#141414"
+bg_inset = "#0a0a0a"
+border = "#2f2f2f"
+border_bright = "#4a4a4a"
+text = "#e8e8f2"
+text_dim = "#ababab"
+text_faint = "#727272"
+accent = "#babaff"
+accent_dim = "#4e4e7f"
+ok = "#8fdcb0"
+warn = "#e8c47f"
+danger = "#e89090"
+
+[radii]
+small = 2
+base = 2
+large = 2
+
+[fonts]
+display = "Chakra Petch"
+body = "IBM Plex Sans"
+mono = "IBM Plex Mono"

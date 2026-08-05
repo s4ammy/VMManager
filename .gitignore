@@ -1,0 +1,22 @@
+# virtualenv
+.venv/
+
+# a read-only clone kept alongside for comparison, not part of this project
+virt-manager/
+
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+.pytest_cache/
+.coverage
+htmlcov/
+
+# runtime state: stats database, cached OS logos
+*.sqlite
+*.sqlite-journal
+
+# scratch screenshots dropped in while working on the UI
+UI Issues/

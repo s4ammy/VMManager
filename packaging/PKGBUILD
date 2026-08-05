@@ -1,0 +1,56 @@
+# Maintainer: Samantha <60522736+s4ammy@users.noreply.github.com>
+#
+# Dependencies come from the distribution rather than pip on purpose: PySide6,
+# libvirt-python and the spice-glib bindings are large, contain compiled
+# extensions, and have to match the Qt and libvirt already on the system.
+
+pkgname=vmmanager
+pkgver=1.0.0
+pkgrel=1
+pkgdesc="A Qt desktop manager for libvirt/QEMU virtual machines"
+arch=('any')
+license=('GPL-2.0-or-later')
+depends=(
+  'python'
+  'pyside6'
+  'libvirt-python'
+  'python-pyte'          # VT102 emulation for the serial and SSH terminals
+  'libvirt'              # the daemon this manages
+)
+optdepends=(
+  'spice-gtk: SPICE consoles'
+  'python-gobject: SPICE consoles'
+  'virt-install: install from an ISO, a network tree, or clone a machine'
+  'qemu-img: disk compaction, format conversion and reclaim estimates'
+  'libisoburn: cloud-init seed images (xorrisofs)'
+  'libguestfs: inspect a shut-off guest'
+  'swtpm: TPM 2.0 for new machines'
+  'openssh: remote hosts and the SSH terminal'
+)
+makedepends=('python-build' 'python-installer' 'python-setuptools' 'python-wheel')
+# Builds the checkout this file sits in. Once the project is published, swap
+# these for a source=() tarball and drop the _repo indirection.
+source=()
+_repo="$startdir/.."
+
+build() {
+  cd "$_repo"
+  python -m build --wheel --no-isolation
+}
+
+check() {
+  cd "$_repo"
+  # the suite runs against libvirt's test:/// driver and needs no display
+  PYTHONPATH="$PWD" QT_QPA_PLATFORM=offscreen pytest -q
+}
+
+package() {
+  cd "$_repo"
+  python -m installer --destdir="$pkgdir" dist/*.whl
+
+  install -Dm644 vmmanager.desktop \
+    "$pkgdir/usr/share/applications/$pkgname.desktop"
+  install -Dm644 vmmanager/assets/icon.svg \
+    "$pkgdir/usr/share/icons/hicolor/scalable/apps/$pkgname.svg"
+  install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+}

@@ -1,0 +1,66 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vmmanager"
+version = "1.0.0"
+description = "A Qt desktop manager for libvirt/QEMU virtual machines"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "GPL-2.0-or-later"
+keywords = ["libvirt", "qemu", "kvm", "virtualization", "qt"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: X11 Applications :: Qt",
+    "Intended Audience :: System Administrators",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Topic :: System :: Emulators",
+]
+
+# Required. Everything else the application needs is either in the standard
+# library or degrades gracefully when missing, which is checked below.
+dependencies = [
+    "PySide6>=6.6",
+    "libvirt-python>=9.0",
+    "pyte>=0.8",          # VT102 emulation for the serial and SSH terminals
+]
+
+# Fill these in once the repository has a URL. Left commented rather than
+# guessed: a wrong URL here ends up on PyPI pages and in package metadata.
+# [project.urls]
+# Homepage = "https://github.com/<you>/<repo>"
+# Issues = "https://github.com/<you>/<repo>/issues"
+
+[project.optional-dependencies]
+# SPICE consoles need spice-glib through PyGObject. Distribution packages are
+# usually the right way to get these (python-gobject + spice-gtk), which is why
+# they are not required: without them the VNC console still works.
+spice = ["PyGObject>=3.44"]
+dev = ["pytest>=8", "pytest-qt>=4"]
+
+[project.gui-scripts]
+vmmanager = "vmmanager.__main__:main"
+
+[tool.setuptools]
+# Assets are part of the package: the fonts the theme loads and the SVG icons
+# the stylesheet points at. Without these the app starts but looks wrong.
+include-package-data = true
+
+[tool.setuptools.packages.find]
+include = ["vmmanager*"]
+
+[tool.setuptools.package-data]
+vmmanager = [
+    "assets/*.svg",
+    "assets/fonts/*.ttf",
+    "assets/icons/*.svg",
+    "assets/logos/*.png",
+    "assets/logos/*.svg",
+    "assets/themes/*.toml",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["error::DeprecationWarning:vmmanager.*"]

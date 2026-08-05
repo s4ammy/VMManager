@@ -1,0 +1,995 @@
+"""Hardware inventory and device add/remove/edit, including per-device XML."""
+
+from __future__ import annotations
+
+import subprocess
+import xml.etree.ElementTree as ET
+
+import libvirt
+
+from .connection import _with_conn, current_uri
+from .models import DiskInfo, FsShareInfo, Hardware, NicInfo
+from .xmlesc import x
+from .xmlutil import _SYSTEM_ITEM_TAGS, _boot_entries, _find_device_element, _hostdev_ident, _next_disk_target, _pretty_xml
+
+def svc_get_hardware(uuid: str) -> Hardware:
+    def go(conn):
+        dom = conn.lookupByUUIDString(uuid)
+        # persistent config, not the live view: this is what edits change,
+        # so pending (next-boot) devices show up right away
+        root = ET.fromstring(dom.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE))
+        os_el = root.find("os")
+        machine = os_el.find("type").get("machine", "?") if os_el is not None else "?"
+        firmware = "UEFI" if (
+            (os_el is not None and os_el.get("firmware") == "efi")
+            or root.find("os/loader") is not None
+        ) else "BIOS"
+        cpu = root.find("cpu")
+        cpu_mode = cpu.get("mode", "custom") if cpu is not None else "default"
+        vcpu_el = root.find("vcpu")
+        mem_el = root.find("memory")
+        cur_el = root.find("currentMemory")
+        disks = []
+        for d in root.findall("devices/disk"):
+            target = d.find("target")
+            source = d.find("source")
+            driver = d.find("driver")
+            src = ""
+            if source is not None:
+                src = source.get("file") or source.get("dev") or source.get("name") or ""
+            disks.append(
+                DiskInfo(
+                    dev=target.get("dev", "?") if target is not None else "?",
+                    bus=target.get("bus", "?") if target is not None else "?",
+                    source=src or f"({d.get('device', 'disk')}, empty)",
+                    format=driver.get("type", "raw") if driver is not None else "raw",
+                    device=d.get("device", "disk"),
+                    cache=driver.get("cache", "default") if driver is not None else "default",
+                )
+            )
+        nics = []
+        for n in root.findall("devices/interface"):
+            mac = n.find("mac")
+            model = n.find("model")
+            src_el = n.find("source")
+            src = ""
+            if src_el is not None:
+                src = (
+                    src_el.get("network")
+                    or src_el.get("bridge")
+                    or src_el.get("dev")
+                    or ""
+                )
+            nics.append(
+                NicInfo(
+                    mac=mac.get("address", "?") if mac is not None else "?",
+                    source=src,
+                    model=model.get("type", "?") if model is not None else "?",
+                )
+            )
+        hostdevs = []
+        for h in root.findall("devices/hostdev"):
+            info = _hostdev_ident(h)
+            if info is not None:
+                hostdevs.append(info)
+        filesystems = []
+        for f in root.findall("devices/filesystem"):
+            src_el = f.find("source")
+            tgt_el = f.find("target")
+            drv_el = f.find("driver")
+            driver = drv_el.get("type", "") if drv_el is not None else ""
+            filesystems.append(
+                FsShareInfo(
+                    tag=tgt_el.get("dir", "?") if tgt_el is not None else "?",
+                    source=src_el.get("dir", "?") if src_el is not None else "?",
+                    driver="virtiofs" if driver == "virtiofs" else "9p",
+                )
+            )
+        graphics = []
+        for g in root.findall("devices/graphics"):
+            graphics.append((g.get("type", "?"), g.get("port") or g.get("listen") or "auto"))
+        video_el = root.find("devices/video/model")
+        video = video_el.get("type", "?") if video_el is not None else "none"
+        mem_kb = int(mem_el.text or 0) if mem_el is not None else 0
+        cur_kb = int(cur_el.text or 0) if cur_el is not None else mem_kb
+        topo_el = root.find("cpu/topology")
+        topology = None
+        if topo_el is not None:
+            topology = (
+                int(topo_el.get("sockets", 1)),
+                int(topo_el.get("cores", 1)),
+                int(topo_el.get("threads", 1)),
+            )
+        sounds = tuple(
+            s.get("model", "?") for s in root.findall("devices/sound")
+        )
+        inputs = tuple(
+            (i.get("type", "?"), i.get("bus", "?"))
+            for i in root.findall("devices/input")
+        )
+        menu_el = root.find("os/bootmenu")
+        accel_el = root.find("devices/video/model/acceleration")
+        wd_el = root.find("devices/watchdog")
+        vsock_el = root.find("devices/vsock")
+        vsock = ""
+        if vsock_el is not None:
+            cid = vsock_el.find("cid")
+            vsock = (
+                "auto" if cid is None or cid.get("auto") == "yes"
+                else cid.get("address", "?")
+            )
+        panic_el = root.find("devices/panic")
+        smartcard_el = root.find("devices/smartcard")
+        audio_el = root.find("devices/audio")
+        memory_devices = tuple(
+            int(size.text or 0) // (1 if (size.get("unit") == "MiB") else 1024)
+            for size in root.findall("devices/memory/target/size")
+        )
+        controllers = tuple(
+            (c.get("type", "?"), int(c.get("index", 0)), c.get("model", "default"))
+            for c in root.findall("devices/controller")
+            if c.get("model")
+        )
+        return Hardware(
+            machine=machine,
+            firmware=firmware,
+            cpu_mode=cpu_mode,
+            vcpus=int(vcpu_el.text or 0) if vcpu_el is not None else 0,
+            memory_mb=cur_kb // 1024,
+            max_memory_mb=mem_kb // 1024,
+            disks=tuple(disks),
+            nics=tuple(nics),
+            hostdevs=tuple(hostdevs),
+            filesystems=tuple(filesystems),
+            graphics=tuple(graphics),
+            video=video,
+            boot=_boot_entries(root),
+            topology=topology,
+            sounds=sounds,
+            inputs=inputs,
+            title=root.findtext("title") or "",
+            description=root.findtext("description") or "",
+            boot_menu=menu_el is not None and menu_el.get("enable") == "yes",
+            video_accel3d=accel_el is not None and accel_el.get("accel3d") == "yes",
+            watchdog=(
+                (wd_el.get("model", "?"), wd_el.get("action", "reset"))
+                if wd_el is not None else None
+            ),
+            redirdevs=len(root.findall("devices/redirdev")),
+            vsock=vsock,
+            panic=panic_el.get("model", "isa") if panic_el is not None else "",
+            smartcard=smartcard_el.get("mode", "?") if smartcard_el is not None else "",
+            audio=audio_el.get("type", "?") if audio_el is not None else "",
+            memory_devices=memory_devices,
+            controllers=controllers,
+        )
+
+    return _with_conn(go)
+
+def svc_qemu_cmdline(uuid: str) -> str:
+    def go(conn):
+        xml = conn.lookupByUUIDString(uuid).XMLDesc(0)
+        argv = conn.domainXMLToNative("qemu-argv", xml)
+        return argv.replace(" -", " \\\n  -")
+
+    return _with_conn(go)
+
+_APPLIED_LIVE = "Applied to the running machine and saved to its configuration."
+
+_APPLIED_CONFIG = "Saved to configuration - takes effect on next start."
+
+def _apply_device(dom, xml: str, action: str) -> str:
+    """attach/detach/update a device, live when the domain runs."""
+    fn = {
+        "attach": dom.attachDeviceFlags,
+        "detach": dom.detachDeviceFlags,
+        "update": dom.updateDeviceFlags,
+    }[action]
+    config = libvirt.VIR_DOMAIN_AFFECT_CONFIG
+    if dom.isActive():
+        try:
+            fn(xml, config | libvirt.VIR_DOMAIN_AFFECT_LIVE)
+            return _APPLIED_LIVE
+        except libvirt.libvirtError:
+            fn(xml, config)
+            return _APPLIED_CONFIG
+    fn(xml, config)
+    return _APPLIED_CONFIG
+
+def _find_device(dom, xpath: str, match):
+    """Locate a device element, preferring the live XML; returns
+    (element, was_in_live) or (None, False)."""
+    if dom.isActive():
+        for el in ET.fromstring(dom.XMLDesc(0)).findall(xpath):
+            if match(el):
+                return el, True
+    for el in ET.fromstring(
+        dom.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE)
+    ).findall(xpath):
+        if match(el):
+            return el, False
+    return None, False
+
+def _detach_element(dom, el, in_live: bool) -> str:
+    xml = ET.tostring(el, encoding="unicode")
+    config = libvirt.VIR_DOMAIN_AFFECT_CONFIG
+    if in_live:
+        try:
+            dom.detachDeviceFlags(xml, config | libvirt.VIR_DOMAIN_AFFECT_LIVE)
+            return _APPLIED_LIVE
+        except libvirt.libvirtError:
+            pass
+    dom.detachDeviceFlags(xml, config)
+    return _APPLIED_CONFIG
+
+def _detect_format(conn, path: str) -> str:
+    try:
+        vol = conn.storageVolLookupByPath(path)
+        fmt = ET.fromstring(vol.XMLDesc(0)).find("target/format")
+        if fmt is not None:
+            return fmt.get("type", "raw")
+    except libvirt.libvirtError:
+        pass
+    return "qcow2" if path.endswith(".qcow2") else "raw"
+
+def svc_attach_disk(uuid: str, path: str, bus: str, fmt: str | None = None) -> str:
+    def go(conn):
+        dom = conn.lookupByUUIDString(uuid)
+        root = ET.fromstring(dom.XMLDesc(0))
+        dev = _next_disk_target(root, bus)
+        disk_fmt = fmt or _detect_format(conn, path)
+        xml = f"""<disk type='file' device='disk'>
+  <driver name='qemu' type='{x(disk_fmt)}' discard='unmap'/>
+  <source file='{x(path)}'/>
+  <target dev='{x(dev)}' bus='{x(bus)}'/>
+</disk>"""
+        return _apply_device(dom, xml, "attach")
+
+    return _with_conn(go)
+
+def svc_detach_disk(uuid: str, target_dev: str) -> str:
+    def go(conn):
+        dom = conn.lookupByUUIDString(uuid)
+        el, live = _find_device(
+            dom, "devices/disk",
+            lambda d: (t := d.find("target")) is not None and t.get("dev") == target_dev,
+        )
+        if el is None:
+            raise RuntimeError(f"No disk with target '{target_dev}'")
+        return _detach_element(dom, el, live)
+
+    return _with_conn(go)
+
+def svc_change_media(uuid: str, target_dev: str, iso_path: str | None) -> str:
+    """Insert or eject cdrom media on an existing drive."""
+
+    def go(conn):
+        dom = conn.lookupByUUIDString(uuid)
+        root = ET.fromstring(dom.XMLDesc(0))
+        for d in root.findall("devices/disk"):
+            t = d.find("target")
+            if d.get("device") == "cdrom" and t is not None and t.get("dev") == target_dev:
+                source = f"<source file='{x(iso_path)}'/>" if iso_path else ""
+                xml = f"""<disk type='file' device='cdrom'>
+  <driver name='qemu' type='raw'/>
+  {source}
+  <target dev='{x(target_dev)}' bus='{x(t.get("bus", "sata"))}'/>
+  <readonly/>
+</disk>"""
+                return _apply_device(dom, xml, "update")
+        raise RuntimeError(f"No cdrom drive at '{target_dev}'")
+
+    return _with_conn(go)
+
+def svc_attach_nic(uuid: str, network: str, model: str) -> str:
+    def go(conn):
+        dom = conn.lookupByUUIDString(uuid)
+        xml = f"""<interface type='network'>
+  <source network='{x(network)}'/>
+  <model type='{x(model)}'/>
+</interface>"""
+        return _apply_device(dom, xml, "attach")
+
+    return _with_conn(go)
+
+def svc_detach_nic(uuid: str, mac: str) -> str:
+    def go(conn):
+        dom = conn.lookupByUUIDString(uuid)
+        el, live = _find_device(
+            dom, "devices/interface",
+            lambda n: (m := n.find("mac")) is not None
+            and m.get("address", "").lower() == mac.lower(),
+        )
+        if el is None:
+            raise RuntimeError(f"No interface with MAC {mac}")
+        return _detach_element(dom, el, live)
+
+    return _with_conn(go)
+
+def svc_set_vcpus(uuid: str, count: int) -> str:
+    def go(conn):
+        dom = conn.lookupByUUIDString(uuid)
+        config = libvirt.VIR_DOMAIN_AFFECT_CONFIG
+        if dom.isActive():
+            try:
+                dom.setVcpusFlags(count, config | libvirt.VIR_DOMAIN_AFFECT_LIVE)
+                return _APPLIED_LIVE
+            except libvirt.libvirtError:
+                pass
+        # raise the config maximum first so the new count always fits
+        try:
+            dom.setVcpusFlags(count, config | libvirt.VIR_DOMAIN_VCPU_MAXIMUM)
+        except libvirt.libvirtError:
+            pass
+        dom.setVcpusFlags(count, config)
+        return _APPLIED_CONFIG
+
+    return _with_conn(go)
+
+def svc_set_memory(uuid: str, current_mb: int, max_mb: int) -> str:
+    def go(conn):
+        dom = conn.lookupByUUIDString(uuid)
+        config = libvirt.VIR_DOMAIN_AFFECT_CONFIG
+        root = ET.fromstring(dom.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE))
+        old_max_kb = int(root.findtext("memory") or 0)
+        if max_mb * 1024 != old_max_kb:
+            dom.setMemoryFlags(max_mb * 1024, config | libvirt.VIR_DOMAIN_MEM_MAXIMUM)
+        if dom.isActive():
+            try:
+                dom.setMemoryFlags(current_mb * 1024, config | libvirt.VIR_DOMAIN_AFFECT_LIVE)
+                return _APPLIED_LIVE
+            except libvirt.libvirtError:
+                pass
+        dom.setMemoryFlags(current_mb * 1024, config)
+        return _APPLIED_CONFIG
+
+    return _with_conn(go)
+
+def svc_set_boot_order(uuid: str, entries: list[str]) -> str:
+    """Reorder boot entries as returned by Hardware.boot.
+
+    Per-device entries look like "disk vda" / "nic 52:54:…"; plain entries
+    ("hd", "cdrom", "network") are os-level boot devs.
+    """
+
+    def go(conn):
+        dom = conn.lookupByUUIDString(uuid)
+        root = ET.fromstring(dom.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE))
+        per_device = any(" " in e for e in entries)
+        os_el = root.find("os")
+        if os_el is None:
+            raise RuntimeError("Domain has no <os> element")
+        if per_device:
+            order = {e: i + 1 for i, e in enumerate(entries)}
+            for d in root.findall("devices/disk"):
+                t = d.find("target")
+                key = f"{d.get('device', 'disk')} {t.get('dev', '?') if t is not None else '?'}"
+                b = d.find("boot")
+                if key in order:
+                    if b is None:
+                        b = ET.SubElement(d, "boot")
+                    b.set("order", str(order[key]))
+                elif b is not None:
+                    d.remove(b)
+            for n in root.findall("devices/interface"):
+                m = n.find("mac")
+                key = f"nic {m.get('address', '?') if m is not None else '?'}"
+                b = n.find("boot")
+                if key in order:
+                    if b is None:
+                        b = ET.SubElement(n, "boot")
+                    b.set("order", str(order[key]))
+                elif b is not None:
+                    n.remove(b)
+            for b in os_el.findall("boot"):
+                os_el.remove(b)
+        else:
+            for b in os_el.findall("boot"):
+                os_el.remove(b)
+            for dev in entries:
+                ET.SubElement(os_el, "boot", {"dev": dev})
+        conn.defineXML(ET.tostring(root, encoding="unicode"))
+        return _APPLIED_CONFIG
+
+    return _with_conn(go)
+
+def svc_get_device_xml(uuid: str, kind: str, ident: str) -> str:
+    def go(conn):
+        dom = conn.lookupByUUIDString(uuid)
+        root = ET.fromstring(dom.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE))
+        if kind in _SYSTEM_ITEM_TAGS:
+            parts = [
+                _pretty_xml(el)
+                for tag in _SYSTEM_ITEM_TAGS[kind]
+                for el in root.findall(tag)
+            ]
+            if not parts:
+                raise RuntimeError(f"No XML for '{kind}'")
+            return "\n".join(parts)
+        el = _find_device_element(root, kind, ident)
+        if el is None:
+            raise RuntimeError(f"Device not found ({kind} {ident})")
+        return _pretty_xml(el)
+
+    return _with_conn(go)
+
+def svc_set_device_xml(uuid: str, kind: str, ident: str, text: str) -> str:
+    try:
+        frag = ET.fromstring(f"<vmm-wrap>{text}</vmm-wrap>")
+    except ET.ParseError as e:
+        raise RuntimeError(f"Invalid XML: {e}") from e
+    if not len(frag):
+        raise RuntimeError("No XML element to apply")
+
+    def go(conn):
+        dom = conn.lookupByUUIDString(uuid)
+        root = ET.fromstring(dom.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE))
+        if kind in _SYSTEM_ITEM_TAGS:
+            allowed = set(_SYSTEM_ITEM_TAGS[kind])
+            for child in frag:
+                if child.tag not in allowed:
+                    raise RuntimeError(
+                        f"<{child.tag}> doesn't belong to this item "
+                        f"(expected {', '.join(sorted(allowed))})"
+                    )
+            for child in frag:
+                old = root.find(child.tag)
+                if old is not None:
+                    idx = list(root).index(old)
+                    root.remove(old)
+                    root.insert(idx, child)
+                else:
+                    root.append(child)
+        else:
+            old = _find_device_element(root, kind, ident)
+            devices = root.find("devices")
+            if old is None or devices is None:
+                raise RuntimeError(f"Device not found ({kind} {ident})")
+            idx = list(devices).index(old)
+            devices.remove(old)
+            for offset, child in enumerate(frag):
+                devices.insert(idx + offset, child)
+        conn.defineXML(ET.tostring(root, encoding="unicode"))
+        return "Saved - applies on next start."
+
+    return _with_conn(go)
+
+def _ensure_shared_memory(conn, dom) -> bool:
+    """virtiofs needs shared memory backing; add it to the config if missing."""
+    root = ET.fromstring(dom.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE))
+    mb = root.find("memoryBacking")
+    access = mb.find("access") if mb is not None else None
+    if access is not None and access.get("mode") == "shared":
+        return False
+    if mb is None:
+        mb = ET.SubElement(root, "memoryBacking")
+    if mb.find("source") is None:
+        ET.SubElement(mb, "source", {"type": "memfd"})
+    if access is None:
+        ET.SubElement(mb, "access", {"mode": "shared"})
+    else:
+        access.set("mode", "shared")
+    conn.defineXML(ET.tostring(root, encoding="unicode"))
+    return True
+
+def svc_attach_filesystem(uuid: str, source_dir: str, tag: str, driver: str) -> str:
+    def go(conn):
+        dom = conn.lookupByUUIDString(uuid)
+        if driver == "virtiofs":
+            memory_changed = _ensure_shared_memory(conn, dom)
+            xml = f"""<filesystem type='mount' accessmode='passthrough'>
+  <driver type='virtiofs'/>
+  <source dir='{x(source_dir)}'/>
+  <target dir='{x(tag)}'/>
+</filesystem>"""
+            if memory_changed and dom.isActive():
+                dom.attachDeviceFlags(xml, libvirt.VIR_DOMAIN_AFFECT_CONFIG)
+                return (
+                    "Share saved. Shared memory backing was enabled too - "
+                    "restart the machine to mount it."
+                )
+        else:
+            xml = f"""<filesystem type='mount' accessmode='mapped'>
+  <source dir='{x(source_dir)}'/>
+  <target dir='{x(tag)}'/>
+</filesystem>"""
+        return _apply_device(dom, xml, "attach")
+
+    return _with_conn(go)
+
+def svc_detach_filesystem(uuid: str, tag: str) -> str:
+    def go(conn):
+        dom = conn.lookupByUUIDString(uuid)
+        el, live = _find_device(
+            dom, "devices/filesystem",
+            lambda f: (t := f.find("target")) is not None and t.get("dir") == tag,
+        )
+        if el is None:
+            raise RuntimeError(f"No share tagged '{tag}'")
+        return _detach_element(dom, el, live)
+
+    return _with_conn(go)
+
+def svc_set_cpu(
+    uuid: str, mode: str, sockets: int, cores: int, threads: int
+) -> str:
+    """CPU model mode + topology; vcpu count becomes the product."""
+
+    def go(conn):
+        dom = conn.lookupByUUIDString(uuid)
+        root = ET.fromstring(dom.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE))
+        cpu = root.find("cpu")
+        if cpu is None:
+            cpu = ET.SubElement(root, "cpu")
+        cpu.attrib.clear()
+        for el in list(cpu):
+            if el.tag in ("topology", "model"):
+                cpu.remove(el)
+        cpu.set("mode", mode)
+        if mode == "custom":
+            cpu.set("match", "exact")
+            model = ET.SubElement(cpu, "model")
+            model.set("fallback", "allow")
+            model.text = "qemu64"
+        total = max(1, sockets * cores * threads)
+        ET.SubElement(
+            cpu, "topology",
+            {"sockets": str(sockets), "cores": str(cores), "threads": str(threads)},
+        )
+        vcpu = root.find("vcpu")
+        if vcpu is None:
+            vcpu = ET.SubElement(root, "vcpu")
+        vcpu.text = str(total)
+        vcpu.attrib.pop("current", None)
+        conn.defineXML(ET.tostring(root, encoding="unicode"))
+        return _APPLIED_CONFIG
+
+    return _with_conn(go)
+
+def svc_set_video(uuid: str, model: str) -> str:
+    def go(conn):
+        dom = conn.lookupByUUIDString(uuid)
+        root = ET.fromstring(dom.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE))
+        devices = root.find("devices")
+        if devices is None:
+            raise RuntimeError("Domain has no <devices> element")
+        for v in devices.findall("video"):
+            devices.remove(v)
+        if model != "none":
+            video = ET.SubElement(devices, "video")
+            ET.SubElement(video, "model", {"type": model})
+        conn.defineXML(ET.tostring(root, encoding="unicode"))
+        return _APPLIED_CONFIG
+
+    return _with_conn(go)
+
+def svc_add_sound(uuid: str, model: str) -> str:
+    def go(conn):
+        dom = conn.lookupByUUIDString(uuid)
+        return _apply_device(dom, f"<sound model='{x(model)}'/>", "attach")
+
+    return _with_conn(go)
+
+def svc_remove_sound(uuid: str, model: str) -> str:
+    def go(conn):
+        dom = conn.lookupByUUIDString(uuid)
+        el, live = _find_device(
+            dom, "devices/sound", lambda s: s.get("model") == model
+        )
+        if el is None:
+            raise RuntimeError(f"No {model} sound device")
+        return _detach_element(dom, el, live)
+
+    return _with_conn(go)
+
+def svc_set_disk_cache(uuid: str, target_dev: str, cache: str) -> str:
+    """Set the cache mode on a disk (config; applies on next start)."""
+
+    def go(conn):
+        dom = conn.lookupByUUIDString(uuid)
+        root = ET.fromstring(dom.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE))
+        for d in root.findall("devices/disk"):
+            t = d.find("target")
+            if t is not None and t.get("dev") == target_dev:
+                driver = d.find("driver")
+                if driver is None:
+                    driver = ET.SubElement(d, "driver", {"name": "qemu"})
+                if cache == "default":
+                    driver.attrib.pop("cache", None)
+                else:
+                    driver.set("cache", cache)
+                conn.defineXML(ET.tostring(root, encoding="unicode"))
+                return _APPLIED_CONFIG
+        raise RuntimeError(f"No disk with target '{target_dev}'")
+
+    return _with_conn(go)
+
+def open_external(uuid: str, tool: str) -> None:
+    """Launch virt-viewer / virt-manager detached for a domain."""
+    if tool == "viewer":
+        cmd = ["virt-viewer", "--connect", current_uri(), "--uuid", uuid, "--wait"]
+    else:
+        cmd = ["virt-manager", "--connect", current_uri(), "--show-domain-console", uuid]
+    subprocess.Popen(cmd, start_new_session=True)
+
+
+# ---------------------------------------------------------------- more devices
+#
+# libvirt supports a good deal more than the handful we grew up with. These
+# follow the same live-then-config pattern as the rest, and each carries the
+# one-line reason you would want it.
+
+WATCHDOG_ACTIONS = ("reset", "poweroff", "shutdown", "pause", "none", "dump")
+PANIC_MODELS = ("isa", "pvpanic", "hyperv", "s390")
+AUDIO_BACKENDS = ("spice", "pipewire", "pulseaudio", "alsa", "none")
+
+
+def _has_spice(root: ET.Element) -> bool:
+    return any(g.get("type") == "spice" for g in root.findall("devices/graphics"))
+
+
+NEEDS_SPICE = (
+    "{what} is carried over a SPICE channel, so the machine needs a SPICE "
+    "display first - add one from Install hardware → Display."
+)
+
+
+def _define_with_device(conn, dom, xml: str) -> str:
+    """Add a device libvirt refuses to attach through the device API.
+
+    A few device types (graphics, panic, and others depending on version) can
+    only be added by rewriting the persistent definition.
+    """
+    root = ET.fromstring(dom.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE))
+    devices = root.find("devices")
+    if devices is None:
+        raise RuntimeError("Domain has no <devices> element")
+    devices.append(ET.fromstring(xml))
+    conn.defineXML(ET.tostring(root, encoding="unicode"))
+    return _APPLIED_CONFIG
+
+
+def svc_add_watchdog(uuid: str, model: str = "itco", action: str = "reset") -> str:
+    """Reset (or stop) a guest whose kernel stops petting the watchdog.
+
+    Some machine types ship one already, q35 has an itco watchdog, so an
+    existing device is retargeted rather than treated as an error.
+    """
+
+    def go(conn):
+        dom = conn.lookupByUUIDString(uuid)
+        root = ET.fromstring(dom.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE))
+        existing = root.find("devices/watchdog")
+        if existing is not None:
+            existing.set("action", action)
+            conn.defineXML(ET.tostring(root, encoding="unicode"))
+            return (
+                f"This machine already had a {existing.get('model', '?')} watchdog; "
+                f"its action is now '{action}'."
+            )
+        return _apply_device(
+            dom, f"<watchdog model='{x(model)}' action='{x(action)}'/>", "attach"
+        )
+
+    return _with_conn(go)
+
+
+def svc_set_watchdog_action(uuid: str, action: str) -> str:
+    def go(conn):
+        dom = conn.lookupByUUIDString(uuid)
+        root = ET.fromstring(dom.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE))
+        wd = root.find("devices/watchdog")
+        if wd is None:
+            raise RuntimeError("This machine has no watchdog")
+        wd.set("action", action)
+        conn.defineXML(ET.tostring(root, encoding="unicode"))
+        return _APPLIED_CONFIG
+
+    return _with_conn(go)
+
+
+def svc_add_usb_redirection(uuid: str) -> str:
+    """A SPICE channel that forwards a host USB device into the guest.
+
+    Unlike PCI/USB passthrough this needs no host device chosen up front;
+    the viewer picks one at runtime, so it stays usable on any host.
+    """
+
+    def go(conn):
+        dom = conn.lookupByUUIDString(uuid)
+        root = ET.fromstring(dom.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE))
+        if not _has_spice(root):
+            raise RuntimeError(NEEDS_SPICE.format(what="USB redirection"))
+        return _apply_device(dom, "<redirdev bus='usb' type='spicevmc'/>", "attach")
+
+    return _with_conn(go)
+
+
+def svc_add_vsock(uuid: str, cid: int = 0) -> str:
+    """Host/guest socket channel; cid 0 means let libvirt allocate one."""
+
+    def go(conn):
+        dom = conn.lookupByUUIDString(uuid)
+        address = (
+            "<cid auto='yes'/>" if not cid else f"<cid auto='no' address='{x(cid)}'/>"
+        )
+        return _apply_device(dom, f"<vsock model='virtio'>{address}</vsock>", "attach")
+
+    return _with_conn(go)
+
+
+def svc_add_panic(uuid: str, model: str = "pvpanic") -> str:
+    """Lets the guest tell the host it panicked, so on_crash can act."""
+
+    def go(conn):
+        dom = conn.lookupByUUIDString(uuid)
+        # libvirt rejects attachDevice for <panic>; rewrite the definition
+        return _define_with_device(conn, dom, f"<panic model='{x(model)}'/>")
+
+    return _with_conn(go)
+
+
+def svc_add_smartcard(uuid: str, mode: str = "passthrough") -> str:
+    def go(conn):
+        dom = conn.lookupByUUIDString(uuid)
+        root = ET.fromstring(dom.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE))
+        if mode == "passthrough":
+            if not _has_spice(root):
+                raise RuntimeError(NEEDS_SPICE.format(what="Smartcard passthrough"))
+            xml = "<smartcard mode='passthrough' type='spicevmc'/>"
+        else:
+            xml = "<smartcard mode='host'/>"
+        try:
+            return _apply_device(dom, xml, "attach")
+        except libvirt.libvirtError as e:
+            if "smartcard" in str(e):
+                raise RuntimeError(
+                    "This QEMU build has no smartcard support "
+                    f"({e.get_error_message()})"
+                ) from e
+            raise
+
+    return _with_conn(go)
+
+
+def svc_add_audio(uuid: str, backend: str = "spice") -> str:
+    """Where the emulated sound card's audio actually goes on the host."""
+
+    def go(conn):
+        dom = conn.lookupByUUIDString(uuid)
+        root = ET.fromstring(dom.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE))
+        devices = root.find("devices")
+        if devices is None:
+            raise RuntimeError("Domain has no <devices> element")
+        if backend == "spice" and not _has_spice(root):
+            raise RuntimeError(NEEDS_SPICE.format(what="SPICE audio"))
+        for old in devices.findall("audio"):
+            devices.remove(old)
+        if backend != "none":
+            ET.SubElement(devices, "audio", {"id": "1", "type": backend})
+        conn.defineXML(ET.tostring(root, encoding="unicode"))
+        return _APPLIED_CONFIG
+
+    return _with_conn(go)
+
+
+def svc_add_memory_device(uuid: str, size_mb: int, slots: int = 16) -> str:
+    """Hot-pluggable DIMM. Needs <maxMemory> with free slots, so add it too."""
+
+    def go(conn):
+        dom = conn.lookupByUUIDString(uuid)
+        root = ET.fromstring(dom.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE))
+        max_el = root.find("maxMemory")
+        current_kb = int(root.findtext("memory") or 0)
+        if max_el is None:
+            # headroom for the DIMMs, and NUMA is required for memory hotplug
+            max_el = ET.Element("maxMemory")
+            max_el.set("slots", str(slots))
+            max_el.set("unit", "KiB")
+            max_el.text = str(current_kb + size_mb * 1024 * slots)
+            root.insert(list(root).index(root.find("memory")), max_el)
+        cpu = root.find("cpu")
+        if cpu is None:
+            cpu = ET.SubElement(root, "cpu")
+        if cpu.find("numa") is None:
+            numa = ET.SubElement(cpu, "numa")
+            ET.SubElement(
+                numa, "cell",
+                {"id": "0", "cpus": f"0-{max(0, int(root.findtext('vcpu') or 1) - 1)}",
+                 "memory": str(current_kb), "unit": "KiB"},
+            )
+        conn.defineXML(ET.tostring(root, encoding="unicode"))
+        dom = conn.lookupByUUIDString(uuid)
+        xml = (
+            "<memory model='dimm'><target>"
+            f"<size unit='MiB'>{x(size_mb)}</size><node>0</node>"
+            "</target></memory>"
+        )
+        return _apply_device(dom, xml, "attach")
+
+    return _with_conn(go)
+
+
+def svc_remove_simple_device(uuid: str, tag: str) -> str:
+    """Detach the first <tag> device, for the single-instance kinds."""
+
+    def go(conn):
+        dom = conn.lookupByUUIDString(uuid)
+        el, live = _find_device(dom, f"devices/{tag}", lambda _e: True)
+        if el is None:
+            raise RuntimeError(f"No {tag} device to remove")
+        return _detach_element(dom, el, live)
+
+    return _with_conn(go)
+
+
+# ---------------------------------------------------------------- config fields
+
+
+def svc_set_nic(
+    uuid: str, mac: str, new_mac: str | None = None,
+    model: str | None = None, link_up: bool | None = None,
+) -> str:
+    """Edit an interface in place: MAC, model, or link state."""
+
+    def go(conn):
+        dom = conn.lookupByUUIDString(uuid)
+        live = dom.isActive()
+        root = ET.fromstring(
+            dom.XMLDesc(0 if live else libvirt.VIR_DOMAIN_XML_INACTIVE)
+        )
+        for iface in root.findall("devices/interface"):
+            m = iface.find("mac")
+            if m is None or m.get("address", "").lower() != mac.lower():
+                continue
+            if new_mac:
+                m.set("address", new_mac)
+            if model:
+                model_el = iface.find("model")
+                if model_el is None:
+                    model_el = ET.SubElement(iface, "model")
+                model_el.set("type", model)
+            if link_up is not None:
+                link = iface.find("link")
+                if link is None:
+                    link = ET.SubElement(iface, "link")
+                link.set("state", "up" if link_up else "down")
+            # link state alone can go live; MAC and model cannot
+            only_link = link_up is not None and not new_mac and not model
+            xml = ET.tostring(iface, encoding="unicode")
+            flags = libvirt.VIR_DOMAIN_AFFECT_CONFIG
+            if only_link and live:
+                try:
+                    dom.updateDeviceFlags(xml, flags | libvirt.VIR_DOMAIN_AFFECT_LIVE)
+                    return _APPLIED_LIVE
+                except libvirt.libvirtError:
+                    pass
+            dom.updateDeviceFlags(xml, flags)
+            return _APPLIED_CONFIG
+        raise RuntimeError(f"No interface with MAC {mac}")
+
+    return _with_conn(go)
+
+
+def svc_set_video_accel(uuid: str, accel3d: bool) -> str:
+    """OpenGL passthrough for the virtio GPU (needs a local SPICE/EGL viewer)."""
+
+    def go(conn):
+        dom = conn.lookupByUUIDString(uuid)
+        root = ET.fromstring(dom.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE))
+        model = root.find("devices/video/model")
+        if model is None:
+            raise RuntimeError("This machine has no video device")
+        accel = model.find("acceleration")
+        if accel is None:
+            accel = ET.SubElement(model, "acceleration")
+        accel.set("accel3d", "yes" if accel3d else "no")
+        conn.defineXML(ET.tostring(root, encoding="unicode"))
+        return _APPLIED_CONFIG
+
+    return _with_conn(go)
+
+
+def svc_set_machine_type(uuid: str, machine: str) -> str:
+    """Chipset / machine type, e.g. q35 vs i440fx or a pinned version."""
+
+    def go(conn):
+        dom = conn.lookupByUUIDString(uuid)
+        root = ET.fromstring(dom.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE))
+        os_type = root.find("os/type")
+        if os_type is None:
+            raise RuntimeError("Domain has no <os><type>")
+        os_type.set("machine", machine)
+        conn.defineXML(ET.tostring(root, encoding="unicode"))
+        return _APPLIED_CONFIG
+
+    return _with_conn(go)
+
+
+def svc_machine_types(arch: str = "x86_64") -> list[str]:
+    """Machine types this hypervisor will accept, newest first."""
+
+    def go(conn):
+        try:
+            caps = ET.fromstring(conn.getCapabilities())
+        except libvirt.libvirtError:
+            return []
+        names: list[str] = []
+        for guest in caps.findall("guest"):
+            if (guest.findtext("arch/../arch") or guest.find("arch").get("name")) != arch:
+                continue
+            for machine in guest.findall("arch/machine"):
+                text = (machine.text or "").strip()
+                if text and text not in names:
+                    names.append(text)
+        # canonical names first (q35, i440fx), then the pinned versions
+        names.sort(key=lambda n: (any(c.isdigit() for c in n), n))
+        return names
+
+    return _with_conn(go)
+
+
+def svc_set_boot_menu(uuid: str, enabled: bool, timeout_ms: int = 3000) -> str:
+    """The firmware's "press a key for the boot menu" prompt."""
+
+    def go(conn):
+        dom = conn.lookupByUUIDString(uuid)
+        root = ET.fromstring(dom.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE))
+        os_el = root.find("os")
+        if os_el is None:
+            raise RuntimeError("Domain has no <os> element")
+        menu = os_el.find("bootmenu")
+        if menu is None:
+            menu = ET.SubElement(os_el, "bootmenu")
+        menu.set("enable", "yes" if enabled else "no")
+        if enabled:
+            menu.set("timeout", str(timeout_ms))
+        else:
+            menu.attrib.pop("timeout", None)
+        conn.defineXML(ET.tostring(root, encoding="unicode"))
+        return _APPLIED_CONFIG
+
+    return _with_conn(go)
+
+
+def svc_set_hostdev_options(
+    uuid: str, kind: str, ident: str,
+    rombar: bool | None = None, startup_policy: str | None = None,
+) -> str:
+    """ROM BAR visibility (PCI) and missing-device policy (USB)."""
+
+    def go(conn):
+        dom = conn.lookupByUUIDString(uuid)
+        root = ET.fromstring(dom.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE))
+        for h in root.findall("devices/hostdev"):
+            info = _hostdev_ident(h)
+            if info is None or info.kind != kind or info.ident != ident:
+                continue
+            if rombar is not None:
+                rom = h.find("rom")
+                if rom is None:
+                    rom = ET.SubElement(h, "rom")
+                rom.set("bar", "on" if rombar else "off")
+            if startup_policy:
+                source = h.find("source")
+                if source is not None:
+                    source.set("startupPolicy", startup_policy)
+            conn.defineXML(ET.tostring(root, encoding="unicode"))
+            return _APPLIED_CONFIG
+        raise RuntimeError(f"No attached {kind} device {ident}")
+
+    return _with_conn(go)
+
+
+def svc_set_controller_model(uuid: str, ctype: str, index: int, model: str) -> str:
+    def go(conn):
+        dom = conn.lookupByUUIDString(uuid)
+        root = ET.fromstring(dom.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE))
+        for c in root.findall("devices/controller"):
+            if c.get("type") == ctype and int(c.get("index", -1)) == index:
+                c.set("model", model)
+                conn.defineXML(ET.tostring(root, encoding="unicode"))
+                return _APPLIED_CONFIG
+        raise RuntimeError(f"No {ctype} controller with index {index}")
+
+    return _with_conn(go)
