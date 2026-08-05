@@ -193,11 +193,6 @@ QToolTip {{
     color: {TEXT};
 }}
 
-#BrandMark {{
-    background: {ACCENT};
-    border-radius: {RADIUS_SM}px;
-}}
-
 .NavButton {{
     text-align: left;
     padding: 9px 14px;

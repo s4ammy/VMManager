@@ -18,16 +18,18 @@ it, and **[FEATURES.md](FEATURES.md)** for what it can do.
 
 ## A look at it
 
-![The machine list: each machine as a wide row with its state, operating-system logo, memory and vCPU count, and a Start button](Previews/machines.png)
+![The machine list: each machine as a wide row with its state, operating-system logo, live CPU graph, address, memory and vCPU count, and the button you most likely want](Previews/machines.png)
 
 Machines as rack bays. The strip down the left edge and the LED carry the state,
-and the host's own load sits in the corner of the sidebar.
+a running machine draws its own CPU graph, and the host's own load sits in the
+corner of the sidebar. `SHUTOFF · DEBUG` is a machine with modes, showing which
+one it is on.
 
-![The hardware tab: a list of every device on the left, grouped into system, network, display and peripherals, with the processor's details on the right](Previews/hardware.png)
+![The hardware tab: a list of every device on the left, grouped into system, storage, network, display and peripherals, with the processor's details on the right](Previews/hardware.png)
 
 Every device on the machine, grouped. Right-click a row to take it off; the panel
-on the right edits whatever is selected. `debug *` beside Start is the current
-mode, with the `*` saying the definition has drifted from it.
+on the right edits whatever is selected - and, as here, most of it while the
+machine is running.
 
 ![The history tab: a list of timestamps on the left and a coloured diff of the selected version against the current one on the right](Previews/history.png)
 

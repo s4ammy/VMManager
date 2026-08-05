@@ -44,18 +44,13 @@ class Sidebar(QFrame):
         root.setSpacing(0)
 
         brand = QHBoxLayout()
-        brand.setSpacing(9)
-        mark = QFrame()
-        mark.setObjectName("BrandMark")
-        mark.setFixedSize(10, 10)
         name = QLabel()
         name.setObjectName("BrandName")
         name.setTextFormat(Qt.TextFormat.RichText)
+        name.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._brand = name
         self.restyle()
-        brand.addWidget(mark)
-        brand.addWidget(name)
-        brand.addStretch(1)
+        brand.addWidget(name, 1)
         root.addLayout(brand)
         root.addSpacing(24)
 
