@@ -22,6 +22,7 @@ from ..libvirt_service import (
     svc_guest_fs_health,
     svc_screenshot,
 )
+from .. import theme
 from ..tasks import run_task
 from ..widgets import VmCard
 

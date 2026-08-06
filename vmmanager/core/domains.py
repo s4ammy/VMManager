@@ -17,6 +17,23 @@ from .networks import svc_create_network
 def svc_domain_action(uuid: str, op: str) -> None:
     def go(conn):
         dom = conn.lookupByUUIDString(uuid)
+        # A guest that suspended itself (S3) is not a guest we paused, and
+        # libvirt keeps the two apart: resume() answers "domain is
+        # pmsuspended" and shutdown() answers "domain is not running", which
+        # is a baffling thing to read about a machine the list calls
+        # suspended. Waking it is a different call.
+        if dom.state()[0] == libvirt.VIR_DOMAIN_PMSUSPENDED:
+            if op == "resume":
+                dom.pMWakeup(0)
+                return
+            if op in ("shutdown", "reboot", "pause"):
+                verb = {"shutdown": "shut it down", "reboot": "reboot it",
+                        "pause": "pause it"}[op]
+                raise RuntimeError(
+                    "This machine has suspended itself, so there is nothing "
+                    f"running inside it to ask. Resume it first, then {verb} "
+                    "- or use Force off, which works either way."
+                )
         ops = {
             "start": dom.create,
             "shutdown": dom.shutdown,

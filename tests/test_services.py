@@ -189,3 +189,82 @@ def test_pool_type_table_and_dialog_fields_cannot_drift(testconn):
     for ptype in POOL_TYPES:
         xml = f"<pool type='{ptype}'><name>p</name>{_pool_source_xml(ptype, opts)}</pool>"
         ET.fromstring(xml)  # raises if the markup is malformed
+
+
+# -- a guest that suspended itself is not a guest we paused
+
+
+class _FakeDomain:
+    """Enough of virDomain for the pmsuspended branch.
+
+    Any method call is recorded rather than each being written out: the
+    action table is built eagerly, so it touches every name on the domain
+    whichever one is being run, and a fake that has to list them all goes
+    stale the moment an action is added.
+    """
+
+    def __init__(self, state: int) -> None:
+        self._state = state
+        self.called: list[str] = []
+
+    def state(self):
+        return (self._state, 0)
+
+    def __getattr__(self, name: str):
+        def record(*_args, **_kwargs):
+            self.called.append(name)
+
+        return record
+
+
+def _run_action(monkeypatch, dom, op):
+    """svc_domain_action against a fake domain rather than a real one.
+
+    libvirt's own test driver has no way to put a domain into pmsuspended,
+    and the real call was verified against qemu:///system by hand.
+    """
+    import libvirt
+
+    from vmmanager.core import domains
+
+    monkeypatch.setattr(
+        domains, "_with_conn",
+        lambda go: go(type("C", (), {"lookupByUUIDString": lambda self, u: dom})()),
+    )
+    return domains.svc_domain_action("some-uuid", op), libvirt
+
+
+def test_resume_wakes_a_machine_that_suspended_itself(monkeypatch):
+    import libvirt
+
+    dom = _FakeDomain(libvirt.VIR_DOMAIN_PMSUSPENDED)
+    _run_action(monkeypatch, dom, "resume")
+    # resume() answers "domain is pmsuspended"; waking it is a different call
+    assert dom.called == ["pMWakeup"]
+
+
+def test_resume_still_resumes_a_machine_we_paused(monkeypatch):
+    import libvirt
+
+    dom = _FakeDomain(libvirt.VIR_DOMAIN_PAUSED)
+    _run_action(monkeypatch, dom, "resume")
+    assert dom.called == ["resume"]
+
+
+@pytest.mark.parametrize("op", ["shutdown", "reboot", "pause"])
+def test_asking_a_suspended_machine_to_do_things_explains_itself(monkeypatch, op):
+    import libvirt
+
+    dom = _FakeDomain(libvirt.VIR_DOMAIN_PMSUSPENDED)
+    with pytest.raises(RuntimeError, match="suspended itself"):
+        _run_action(monkeypatch, dom, op)
+    assert dom.called == [], "nothing should have been attempted"
+
+
+def test_force_off_works_on_a_suspended_machine(monkeypatch):
+    """The one thing that always works, and what the message points at."""
+    import libvirt
+
+    dom = _FakeDomain(libvirt.VIR_DOMAIN_PMSUSPENDED)
+    _run_action(monkeypatch, dom, "force-off")
+    assert dom.called == ["destroy"]

@@ -566,3 +566,20 @@ def test_right_clicking_a_heading_or_empty_space_opens_nothing(qapp, testconn):
         assert page._aim_at_hw_item(None) is None
     finally:
         page.shutdown()
+
+
+def test_the_error_banner_can_actually_be_shown(qapp):
+    """The path that reports a failed action must not fail itself.
+
+    It used to: the banner interpolates theme.DANGER, machines.py never
+    imported theme, and the NameError replaced the message with a crash
+    dialog - so a machine that would not resume said nothing about why.
+    """
+    from vmmanager.pages.machines import MachinesPage
+
+    page = MachinesPage()
+    page.show()
+    page.show_action_error("domain is pmsuspended")
+    qapp.processEvents()
+    page.show_error("could not reach libvirt")
+    qapp.processEvents()

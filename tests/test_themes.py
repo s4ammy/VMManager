@@ -406,3 +406,54 @@ def test_a_unique_name_is_suggested_rather_than_a_clash(page):
     make(page, "Mine 2")
     assert page._unique("Mine") == "Mine 3"
     assert page._unique("Other") == "Other"
+
+
+def test_modules_that_use_theme_have_it_imported():
+    """`theme.DANGER` in a module that never imported theme is a NameError
+    waiting for the code path that reaches it.
+
+    machines.py did exactly this: the line only runs when an action fails,
+    so the crash hid behind a rare path until a suspended machine refused
+    to resume and the error banner took the window down with it.
+
+    The modules are imported rather than parsed, because several tabs get
+    `theme` through `from .common import *` and only the import system
+    knows that.
+    """
+    import ast
+    import importlib
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent / "vmmanager"
+    missing = []
+    for path in sorted(root.rglob("*.py")):
+        if path.name == "__main__.py":
+            continue
+        tree = ast.parse(path.read_text())
+        uses_theme = any(
+            isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "theme"
+            for node in ast.walk(tree)
+        )
+        if not uses_theme:
+            continue
+        # theme.py and themes.py take a Theme *called* theme, which is a
+        # local and nothing to do with the module.
+        local = any(
+            (isinstance(node, ast.arg) and node.arg == "theme")
+            or (isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store)
+                and node.id == "theme")
+            for node in ast.walk(tree)
+        )
+        if local:
+            continue
+        dotted = ".".join(
+            ["vmmanager", *path.relative_to(root).with_suffix("").parts]
+        ).removesuffix(".__init__")
+        module = importlib.import_module(dotted)
+        if not hasattr(module, "theme"):
+            missing.append(dotted)
+    assert missing == [], (
+        "these use `theme.` but never bind the name: " + ", ".join(missing)
+    )
