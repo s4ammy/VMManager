@@ -7,7 +7,6 @@ folders on disk; nothing here touches libvirt or runs qemu-img.
 from __future__ import annotations
 
 import json
-import os
 
 import pytest
 

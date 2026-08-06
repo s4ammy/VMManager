@@ -6,6 +6,7 @@ import os
 
 from PySide6.QtCore import QSettings, Qt, Signal
 from PySide6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -118,6 +119,25 @@ def console_autoconnect() -> bool:
 def console_release_keys() -> str:
     """Key combination that gives the pointer and keyboard back."""
     return QSettings(*_SETTINGS).value("console_release_keys", "Ctrl+Alt")
+
+
+def console_force_xwayland() -> bool:
+    """Whether to start the whole app under XWayland, for the keyboard grab.
+
+    Qt's Wayland plugin does not implement shortcut inhibition, so on a
+    Wayland session Super and Alt+Tab always go to the desktop however the
+    console asks for them. Under XWayland the X11 grab is granted and the
+    guest gets every key. It is off by default because it costs the rest of
+    the app native Wayland output - fractional scaling, chiefly - and only
+    the console gains anything.
+    """
+    return QSettings(*_SETTINGS).value("console_force_xwayland", "false") in (
+        "true", True
+    )
+
+
+def save_console_force_xwayland(on: bool) -> None:
+    QSettings(*_SETTINGS).setValue("console_force_xwayland", "true" if on else "false")
 
 
 def console_grab_keyboard() -> bool:
@@ -360,6 +380,27 @@ class SettingsPage(QWidget):
                 "console_grab_keyboard", "true" if on else "false")
         )
         content.addWidget(self.grab_keyboard)
+
+        # Only worth offering where it changes anything: on X11 the grab is
+        # already granted, so the option would be a switch that does nothing.
+        if QApplication.instance().platformName().startswith("wayland"):
+            self.force_xwayland = QCheckBox(
+                "Capture Super and Alt+Tab as well (starts under XWayland)"
+            )
+            self.force_xwayland.setToolTip(
+                "Wayland keeps those keys for the desktop, and Qt has no way "
+                "to ask for them, so the console never sees them. Running "
+                "under XWayland does get them - at the cost of native Wayland "
+                "output for the rest of the app. Takes effect at the next "
+                "start."
+            )
+            self.force_xwayland.setChecked(console_force_xwayland())
+            self.force_xwayland.toggled.connect(
+                lambda on: self._settings.setValue(
+                    "console_force_xwayland", "true" if on else "false")
+            )
+            content.addWidget(self.force_xwayland)
+
         self.resize_guest = QCheckBox(
             "Resize the guest's resolution to match the window (needs a "
             "retargetable display: virtio or QXL, with the guest's driver)"

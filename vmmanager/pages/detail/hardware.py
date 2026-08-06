@@ -5,6 +5,154 @@ from __future__ import annotations
 from .common import *  # noqa: F403 - shared imports for the tab modules
 
 
+class _FlowLayout(QLayout):
+    """Lay widgets out left to right, wrapping when the row runs out.
+
+    The faceplate's action buttons are between one and four depending on
+    the device, and a row of four is wider than the panel gets when the
+    window is not maximised - which pushed the whole faceplate wide and
+    clipped every field on it. Qt has no flow layout of its own; this is
+    the usual small one, height-for-width so the panel above it knows how
+    much room the buttons will actually need.
+    """
+
+    def __init__(self, spacing: int = 8) -> None:
+        super().__init__()
+        self._items: list = []
+        self.setSpacing(spacing)
+        self.setContentsMargins(0, 0, 0, 0)
+
+    def addItem(self, item) -> None:  # noqa: N802 - Qt's name
+        self._items.append(item)
+
+    def count(self) -> int:
+        return len(self._items)
+
+    def itemAt(self, index):  # noqa: N802 - Qt's name
+        return self._items[index] if 0 <= index < len(self._items) else None
+
+    def takeAt(self, index):  # noqa: N802 - Qt's name
+        return self._items.pop(index) if 0 <= index < len(self._items) else None
+
+    def expandingDirections(self):  # noqa: N802 - Qt's name
+        return Qt.Orientation(0)
+
+    def hasHeightForWidth(self) -> bool:  # noqa: N802 - Qt's name
+        return True
+
+    def heightForWidth(self, width: int) -> int:  # noqa: N802 - Qt's name
+        return self._lay_out(QRect(0, 0, width, 0), place=False)
+
+    def setGeometry(self, rect) -> None:  # noqa: N802 - Qt's name
+        super().setGeometry(rect)
+        self._lay_out(rect, place=True)
+
+    def sizeHint(self):  # noqa: N802 - Qt's name
+        return self.minimumSize()
+
+    def minimumSize(self):  # noqa: N802 - Qt's name
+        size = QSize()
+        for item in self._items:
+            size = size.expandedTo(item.minimumSize())
+        return size
+
+    def _lay_out(self, rect, place: bool) -> int:
+        x, y, line_height = rect.x(), rect.y(), 0
+        for item in self._items:
+            hint = item.sizeHint()
+            if x > rect.x() and x + hint.width() > rect.right():
+                x = rect.x()
+                y += line_height + self.spacing()
+                line_height = 0
+            if place:
+                item.setGeometry(QRect(QPoint(x, y), hint))
+            x += hint.width() + self.spacing()
+            line_height = max(line_height, hint.height())
+        return y + line_height - rect.y()
+
+
+
+def _hint_mark(text: str):
+    """The "?" beside a field, explaining it on hover.
+
+    These were paragraphs under each field, which read well on one device
+    and turned a disk into a page of prose. The explanation is worth
+    keeping and worth getting out of the way.
+    """
+    mark = QLabel("?")
+    mark.setObjectName("FieldHint")
+    mark.setToolTip(text)
+    mark.setFixedSize(18, 18)
+    mark.setAlignment(Qt.AlignmentFlag.AlignCenter)
+    mark.setCursor(Qt.CursorShape.WhatsThisCursor)
+    return mark
+
+
+def _arrow_icon(up: bool, colour: str, size: int = 12):
+    """A triangle, drawn rather than typed.
+
+    ▲ and ▼ are not in the faces this app ships, so they came out of
+    whatever fallback the system found - a different weight and baseline
+    from everything around them, when they appeared at all. Painting the
+    shape is four lines and always looks like the rest of the interface.
+    """
+    from PySide6.QtCore import QPointF
+    from PySide6.QtGui import QIcon, QPainter, QPixmap, QPolygonF
+
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.setBrush(QColor(colour))
+    painter.setPen(Qt.PenStyle.NoPen)
+    inset, mid = size * 0.22, size / 2
+    tip, base = (inset, size - inset) if up else (size - inset, inset)
+    painter.drawPolygon(QPolygonF([
+        QPointF(mid, tip), QPointF(inset, base), QPointF(size - inset, base),
+    ]))
+    painter.end()
+    return QIcon(pixmap)
+
+
+# What a machine can be told to boot from, and what to call each one. The
+# faceplate offers every class the machine actually has a device for.
+_BOOT_NAMES = {
+    "hd": "Hard disk", "cdrom": "Optical drive",
+    "network": "Network (PXE)", "fd": "Floppy drive",
+}
+
+
+def _boot_label(entry: str) -> str:
+    """A boot entry as something to read, either form."""
+    if " " not in entry:
+        return _BOOT_NAMES.get(entry, entry)
+    kind, _, which = entry.partition(" ")
+    return f"{_BOOT_NAMES.get({'disk': 'hd', 'nic': 'network'}.get(kind, kind), kind)} · {which}"
+
+
+def _boot_candidates(hw) -> list[str]:
+    """The boot entries in use, then the ones that could be added.
+
+    libvirt has two ways of saying this - <boot order> on each device, or
+    a list of device classes under <os> - and a machine uses one or the
+    other. Whichever it already uses is the one offered, because writing
+    the other kind would silently drop the existing order.
+    """
+    order = list(hw.boot or ())
+    if any(" " in e for e in order):
+        possible = [f"{d.device} {d.dev}" for d in hw.disks]
+        possible += [f"nic {n.mac}" for n in hw.nics]
+    else:
+        possible = []
+        if any(d.device != "cdrom" for d in hw.disks):
+            possible.append("hd")
+        if any(d.device == "cdrom" for d in hw.disks):
+            possible.append("cdrom")
+        if hw.nics:
+            possible.append("network")
+    return order + [e for e in possible if e not in order]
+
+
 class HardwareMixin:
     """Mixed into DetailPage; expects its attributes."""
 
@@ -51,11 +199,52 @@ class HardwareMixin:
         left.addWidget(install)
         split.addLayout(left)
 
+        # The faceplate carries every property of a device as a live field,
+        # so a disk or a display is taller than the tab. Scroll the inside of
+        # the card rather than the card itself: the frame stays put and only
+        # the fields move, which is what makes the scrollbar readable as
+        # "there is more of this device" rather than "the page is long".
         panel_frame = QFrame()
         panel_frame.setProperty("class", "ChartCard")
-        self.hw_panel = QVBoxLayout(panel_frame)
+        frame_box = QVBoxLayout(panel_frame)
+        frame_box.setContentsMargins(0, 0, 0, 0)
+        panel_body = QWidget()
+        panel_body.setObjectName("HwPanelBody")
+        self.hw_panel = QVBoxLayout(panel_body)
         self.hw_panel.setContentsMargins(22, 18, 22, 18)
         self.hw_panel.setSpacing(8)
+        self.hw_scroll = QScrollArea()
+        self.hw_scroll.setWidgetResizable(True)
+        self.hw_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        # As-needed rather than off: a faceplate that will not fit is a
+        # layout to fix, but clipping it hides the fields entirely and
+        # scrolling at least leaves them reachable.
+        self.hw_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+        self.hw_scroll.setWidget(panel_body)
+        frame_box.addWidget(self.hw_scroll, 1)
+
+        # Save and Discard sit outside the scrolled area, so a change made
+        # at the top of a long faceplate does not put the button that saves
+        # it below the fold.
+        self.hw_save_bar = QWidget()
+        save_row = QHBoxLayout(self.hw_save_bar)
+        save_row.setContentsMargins(22, 10, 22, 12)
+        save_row.setSpacing(8)
+        save_row.addStretch(1)
+        discard = QPushButton("Discard")
+        discard.setProperty("class", "GhostButton")
+        discard.setCursor(Qt.CursorShape.PointingHandCursor)
+        discard.clicked.connect(self._discard_fields)
+        save_row.addWidget(discard)
+        save = QPushButton("Save changes")
+        save.setProperty("class", "PrimaryButton")
+        save.setCursor(Qt.CursorShape.PointingHandCursor)
+        save.clicked.connect(self._save_fields)
+        save_row.addWidget(save)
+        self.hw_save_bar.setVisible(False)
+        frame_box.addWidget(self.hw_save_bar)
         split.addWidget(panel_frame, 1)
         outer.addLayout(split, 1)
 
@@ -142,7 +331,7 @@ class HardwareMixin:
         ])
         add_group("DISPLAY", [
             ("video", f"video · {hw.video}", None),
-            *[("gfx", f"{t} display · {p}", (t, p)) for t, p in hw.graphics],
+            *[("gfx", f"{g.type} display · {g.ident}", g) for g in hw.graphics],
         ])
         add_group("PERIPHERALS", [
             *[("sound", f"sound · {m}", m) for m in hw.sounds],
@@ -247,10 +436,9 @@ class HardwareMixin:
         if kind == "nic":
             return self._remove_nic
         if kind == "gfx":
-            if not payload:
-                return None  # a display row always carries (type, port)
-            gtype, ident = payload
-            return lambda: self._remove_display(gtype, ident)
+            if payload is None:
+                return None  # a display row always carries its detail
+            return lambda: self._remove_display(payload.type, payload.ident)
         if kind == "video":
             return self._remove_video
         if kind in ("usb", "pci", "mdev"):
@@ -333,18 +521,36 @@ class HardwareMixin:
             return None
         return items[0].data(0, Qt.ItemDataRole.UserRole)
 
+    def _discard_fields(self) -> None:
+        """Put the faceplate back to what the machine says."""
+        self._boot_draft = None
+        self._show_hw_detail()
+
     def _panel_clear(self) -> None:
+        self._fields = []
+        self._field_bar = None
+        if getattr(self, "hw_save_bar", None) is not None:
+            self.hw_save_bar.setVisible(False)
+        # setParent(None) before deleteLater, not just deleteLater: the
+        # delete does not happen until the event loop runs, and until then
+        # the old faceplate's widgets are still children of the panel. A
+        # redraw would otherwise leave two of every field in the tree.
+        def drop(w) -> None:
+            w.setParent(None)
+            w.deleteLater()
+
         while self.hw_panel.count():
             item = self.hw_panel.takeAt(0)
             w = item.widget()
             if w is not None:
-                w.deleteLater()
+                drop(w)
             elif item.layout() is not None:
                 sub = item.layout()
                 while sub.count():
                     s = sub.takeAt(0)
                     if s.widget():
-                        s.widget().deleteLater()
+                        drop(s.widget())
+                sub.deleteLater()
 
     def _panel_title(self, badge: str, title: str) -> None:
         row = QHBoxLayout()
@@ -379,19 +585,118 @@ class HardwareMixin:
         k.setFixedWidth(90)
         v = QLabel(value)
         v.setProperty("class", "StatVal")
-        v.setWordWrap(True)
+        v.setWordWrap(True)  # a path wraps at its slashes rather than pushing
         v.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         row.addWidget(k, alignment=Qt.AlignmentFlag.AlignTop)
         row.addWidget(v, 1)
         self.hw_panel.addLayout(row)
 
+    # ---------------------------------------------------------------- fields
+    #
+    # A faceplate row that can be changed is the widget itself, not a reading
+    # with an Edit button beside it. Each one registers what it is worth
+    # applying and how; Save walks the ones whose value moved, Discard just
+    # redraws the panel from the machine.
+
+    def _panel_control(self, key: str, widget, hint: str = "") -> None:
+        """A control on the faceplate that is not itself a value.
+
+        The boot arrows are the case: they rearrange the list that is the
+        value, and are not worth saving on their own.
+        """
+        self._panel_field(key, widget, None, None, hint)
+
+    def _panel_field(self, key: str, widget, read, apply, hint: str = "",
+                     wide: bool = False) -> None:
+        """One editable property. `read` returns the widget's current value,
+        `apply` takes it and returns a message.
+
+        Several fields may share one `apply` when libvirt takes them
+        together - a CPU's sockets, cores and threads are one call, not
+        three. Save calls each distinct applier once; a shared one should
+        read the widgets itself and ignore the value it is handed.
+        """
+        row = QHBoxLayout()
+        k = QLabel(key.upper())
+        k.setProperty("class", "StatKey")
+        k.setFixedWidth(90)
+        row.addWidget(k, alignment=Qt.AlignmentFlag.AlignTop)
+        row.addWidget(widget, 1)
+        if hint:
+            row.addWidget(_hint_mark(hint), 0, Qt.AlignmentFlag.AlignTop)
+        if wide:  # a notes box wants the whole width, under its label
+            self.hw_panel.addWidget(k)
+            row.removeWidget(k)
+            k.setFixedWidth(90)
+        self.hw_panel.addLayout(row)
+        if read is None:
+            return
+        self._fields.append((read, read(), apply))
+        for signal in ("textEdited", "textChanged", "currentTextChanged",
+                       "toggled", "valueChanged"):
+            if hasattr(widget, signal):
+                getattr(widget, signal).connect(self._field_touched)
+                break
+
+    def _panel_watch(self, read, original, apply) -> None:
+        """Register a value that is not one widget.
+
+        The boot order is the case: it is a list the arrows and the tick
+        boxes both rewrite, so what is dirty is the list, not any control
+        on the faceplate.
+        """
+        self._fields.append((read, original, apply))
+
+    def _field_touched(self, *_args) -> None:
+        if getattr(self, "_field_bar", None) is not None:
+            self._field_bar.setVisible(bool(self._dirty_fields()))
+
+    def _dirty_fields(self) -> list:
+        return [
+            (read, apply) for read, original, apply in self._fields
+            if read() != original
+        ]
+
+    def _panel_save_bar(self) -> None:
+        """Arm the faceplate's Save and Discard pair.
+
+        The bar itself is built once and lives below the scroll area; a
+        faceplate with editable fields on it says so here. Not simply
+        hidden on arming: the boot arrows redraw the faceplate mid-edit,
+        and the change they are part of has to still look unsaved.
+        """
+        self._field_bar = self.hw_save_bar
+        self.hw_save_bar.setVisible(bool(self._dirty_fields()))
+
+    def _save_fields(self) -> None:
+        changed = self._dirty_fields()
+        if not changed:
+            return
+        # One call per distinct applier, in the order the fields appear:
+        # fields that libvirt takes together share theirs.
+        values: list = []
+        for read, apply in changed:
+            if not any(apply is seen for seen, _v in values):
+                values.append((apply, read()))
+        self.hw_status.setText(f"applying {len(values)} change(s)…")
+
+        def work():
+            return " · ".join(dict.fromkeys(
+                str(apply(value)) for apply, value in values
+            ))
+
+        run_task(
+            work,
+            done=lambda msg: (self.hw_status.setText(str(msg)),
+                              self._load_hardware()),
+            failed=self._hw_failed,
+        )
+
     def _panel_actions(self, *buttons) -> None:
         self.hw_panel.addSpacing(10)
-        row = QHBoxLayout()
-        row.setSpacing(8)
+        row = _FlowLayout()
         for btn in buttons:
             row.addWidget(btn)
-        row.addStretch(1)
         self.hw_panel.addLayout(row)
 
     @staticmethod
@@ -401,7 +706,7 @@ class HardwareMixin:
         if kind == "nic":
             return payload.mac
         if kind == "gfx":
-            return payload[0]
+            return payload.type
         if kind == "sound":
             return str(payload)
         if kind == "input":
@@ -410,6 +715,9 @@ class HardwareMixin:
             return payload.ident
         if kind == "fs":
             return payload.tag
+        if kind == "controller":
+            ctype, index, _model = payload
+            return f"{ctype}/{index}"
         return ""
 
     def _show_hw_xml(self, kind: str, payload) -> None:
@@ -445,9 +753,16 @@ class HardwareMixin:
         )
 
     def _show_hw_detail(self) -> None:
-        self._panel_clear()
         hw = self._hw
         sel = self._selected_device()
+        # A half-rearranged boot order belongs to the row it was started on.
+        showing = (sel[0], self._hw_ident(*sel)) if sel else None
+        if showing != getattr(self, "_hw_showing", None):
+            self._boot_draft = None
+            self._hw_showing = showing
+            if getattr(self, "hw_scroll", None) is not None:
+                self.hw_scroll.verticalScrollBar().setValue(0)
+        self._panel_clear()
         if sel is None or hw is None:
             hint = QLabel("Select a component on the left.")
             hint.setObjectName("ConsoleHint")
@@ -516,92 +831,106 @@ class HardwareMixin:
             return
 
         if kind == "cpu":
-            self._panel_title(badge, "Processor")
-            self._panel_row("model", hw.cpu_mode)
-            if hw.topology:
-                s, c, t = hw.topology
-                self._panel_row("topology", f"{s} sockets · {c} cores · {t} threads")
-            self._panel_row("vcpus", str(hw.vcpus))
-            self._panel_row("machine", hw.machine)
-            self._panel_row("firmware", hw.firmware)
-            self._panel_actions(
-                _ghost("Edit processor…", self._edit_cpu),
-                _ghost("Machine type…", self._edit_machine_type),
-            )
+            self._show_cpu_detail(badge, hw)
         elif kind == "mem":
-            self._panel_title(badge, "Memory")
-            self._panel_row("current", fmt_mem(hw.memory_mb))
-            self._panel_row("maximum", fmt_mem(hw.max_memory_mb))
-            self._panel_actions(_ghost("Edit memory…", self._edit_memory))
+            self._show_memory_detail(badge, hw)
         elif kind == "boot":
-            self._panel_title(badge, "Boot order")
-            for i, entry in enumerate(hw.boot or ("hd",), 1):
-                self._panel_row(f"{i}.", entry)
-            self._panel_row("boot menu", "on" if hw.boot_menu else "off")
-            self._panel_actions(
-                _ghost("Reorder…", self._edit_boot_order),
-                _ghost(
-                    "Turn boot menu " + ("off" if hw.boot_menu else "on"),
-                    lambda: self._toggle_boot_menu(not hw.boot_menu),
-                ),
-            )
+            self._show_boot_detail(badge, hw)
         elif kind in ("disk", "cdrom"):
             d = payload
             self._panel_title(badge, f"{d.dev} - {'optical drive' if kind == 'cdrom' else 'disk'}")
             self._panel_row("source", d.source)
             self._panel_row("bus", d.bus)
             self._panel_row("format", d.format)
-            self._panel_row("cache", d.cache)
+
+            cache = QComboBox()
+            cache.addItems(["default", "none", "writeback", "writethrough",
+                            "directsync", "unsafe"])
+            cache.setCurrentText(d.cache or "default")
+            self._panel_field(
+                "cache", cache, cache.currentText,
+                lambda v: svc_set_disk_cache(self.uuid, d.dev, v),
+                "none is safest for a host crash and best for raw throughput; "
+                "writeback is faster for bursty writes; unsafe is for a "
+                "machine you would not mind losing. Takes effect at the next "
+                "start.",
+            )
+
+            serial = QLineEdit(d.serial)
+            serial.setPlaceholderText("what the guest reads as the serial")
+            self._panel_field(
+                "serial", serial, serial.text,
+                lambda v: svc_set_disk_options(self.uuid, d.dev, serial=v),
+                "udev names the drive /dev/disk/by-id/…-<serial> inside the "
+                "guest, so setting this gives it a name that survives the "
+                "disks being reordered.",
+            )
+            discard = QComboBox()
+            discard.addItems(["default", "unmap", "ignore"])
+            discard.setCurrentText(d.discard or "default")
+            self._panel_field(
+                "discard", discard, discard.currentText,
+                lambda v: svc_set_disk_options(
+                    self.uuid, d.dev, discard="" if v == "default" else v),
+                "unmap passes the guest's TRIM through to the host image, "
+                "which is what stops a thin image only ever growing.",
+            )
+            ro = QCheckBox("Write-protected")
+            ro.setChecked(d.readonly)
+            self._panel_field(
+                "read only", ro, ro.isChecked,
+                lambda v: svc_set_disk_options(self.uuid, d.dev, readonly=v),
+                "Enforced by QEMU rather than asked of the guest, so a write "
+                "fails at the device instead of reaching the image.",
+            )
+            sh = QCheckBox("Shared between machines")
+            sh.setChecked(d.shareable)
+            self._panel_field(
+                "shareable", sh, sh.isChecked,
+                lambda v: svc_set_disk_options(self.uuid, d.dev, shareable=v),
+                "Nothing coordinates the writes, so this is for a cluster "
+                "filesystem or a disk both sides only read. Anything else "
+                "corrupts it.",
+            )
+            self._panel_save_bar()
+
             buttons = []
             if kind == "cdrom":
                 buttons.append(_ghost("Change media…", self._change_media))
-            buttons.append(_ghost("Cache mode…", self._edit_disk_cache))
             if kind == "disk":
+                buttons.append(_ghost("Grow…", self._grow_disk))
                 buttons.append(_ghost("Move to pool…", self._move_disk))
             buttons.append(_ghost("Remove", self._remove_disk))
             self._panel_actions(*buttons)
         elif kind == "nic":
-            n = payload
-            self._panel_title(badge, f"Network interface - {n.source or 'direct'}")
-            self._panel_row("mac", n.mac)
-            self._panel_row("model", n.model)
-            self._panel_row("network", n.source or " - ")
-            self._panel_row("filter", n.filter or " - ")
-            self._panel_actions(
-                _ghost("Edit…", lambda: self._edit_nic(n)),
-                _ghost("Remove", self._remove_nic),
-            )
+            self._show_nic_detail(badge, payload)
         elif kind == "video":
             self._panel_title(badge, "Video adapter")
-            self._panel_row("model", hw.video)
-            self._panel_row("3d acceleration", "on" if hw.video_accel3d else "off")
-            self._panel_actions(
-                _ghost("Change model…", self._edit_video),
-                _ghost(
-                    "Turn 3D " + ("off" if hw.video_accel3d else "on"),
-                    lambda: self._toggle_accel3d(not hw.video_accel3d),
-                ),
-                _ghost("Remove", self._remove_video),
+            model = QComboBox()
+            known = ["virtio", "qxl", "vga", "bochs", "ramfb", "none"]
+            # Keep whatever it actually has, even when it is not one of these:
+            # a combo that cannot show the current value reads as a request
+            # to change it the moment anything else on the faceplate is saved.
+            model.addItems(known if hw.video in known else [hw.video, *known])
+            model.setCurrentText(hw.video)
+            self._panel_field(
+                "model", model, model.currentText,
+                lambda v: svc_set_video(self.uuid, v),
+                "virtio for a modern guest with its driver installed, qxl for "
+                "SPICE with more than one monitor, vga for something ancient. "
+                "Takes effect at the next start.",
             )
+            accel = QCheckBox("Accelerated")
+            accel.setChecked(hw.video_accel3d)
+            self._panel_field(
+                "3d", accel, accel.isChecked,
+                lambda v: svc_set_video_accel(self.uuid, v),
+                "virtio only, and it needs OpenGL on the display as well.",
+            )
+            self._panel_save_bar()
+            self._panel_actions(_ghost("Remove", self._remove_video))
         elif kind == "gfx":
-            gtype, ident = payload
-            self._panel_title(badge, f"{gtype.upper()} display")
-            self._panel_row("type", gtype)
-            # the identity is a port, or the address it listens on when the
-            # port is left to libvirt - so do not call it a port either way
-            numeric = str(ident).lstrip("-").isdigit()
-            self._panel_row("port" if numeric else "listens on", str(ident))
-            hint = QLabel(
-                "The Console tab connects to this display. With both a VNC "
-                "and a SPICE display it uses the VNC one, so remove that to "
-                "work over SPICE - which is what the shared clipboard needs."
-            )
-            hint.setWordWrap(True)
-            hint.setObjectName("ConsoleHint")
-            self.hw_panel.addWidget(hint)
-            self._panel_actions(
-                _ghost("Remove", lambda: self._remove_display(gtype, ident)),
-            )
+            self._show_display_detail(badge, payload)
         elif kind == "sound":
             self._panel_title(badge, f"Sound - {payload}")
             self._panel_row("model", str(payload))
@@ -626,32 +955,59 @@ class HardwareMixin:
             self._panel_title(badge, f"{title} - {h.ident}")
             self._panel_row("type", h.kind.upper())
             self._panel_row("address" if h.kind != "mdev" else "uuid", h.ident)
-            actions = []
-            if h.kind != "mdev":
-                actions.append(
-                    _ghost("Options…", lambda: self._edit_hostdev_options(h))
+            if h.kind == "pci":
+                self._pci_option_fields(h)
+            elif h.kind == "usb":
+                policy = QComboBox()
+                policy.addItems(["mandatory", "requisite", "optional"])
+                policy.setCurrentText(h.startup_policy or "mandatory")
+                self._panel_field(
+                    "if missing", policy, policy.currentText,
+                    lambda v: svc_set_hostdev_options(
+                        self.uuid, "usb", h.ident, startup_policy=v),
+                    "mandatory refuses to start the machine without the "
+                    "device; optional starts anyway and picks it up when it "
+                    "is plugged in.",
                 )
-            actions.append(_ghost("Detach from machine", self._remove_hostdev))
-            self._panel_actions(*actions)
+                self._panel_save_bar()
+            self._panel_actions(_ghost("Detach from machine", self._remove_hostdev))
         elif kind == "labels":
             self._panel_title(badge, "Name and notes")
-            self._panel_row("title", hw.title or " - ")
-            self._panel_row("description", hw.description or " - ")
-            self._panel_actions(_ghost("Edit…", self._edit_labels))
+            title = QLineEdit(hw.title)
+            title.setPlaceholderText("Build server")
+            notes = QPlainTextEdit(hw.description)
+            notes.setMinimumHeight(120)
+
+            def save_labels(_v) -> str:
+                return svc_set_labels(
+                    self.uuid, title.text().strip(), notes.toPlainText().strip()
+                )
+
+            self._panel_field(
+                "title", title, title.text, save_labels,
+                "A friendly label shown beside the machine name. The name "
+                "itself is what libvirt knows it as and does not change here.",
+            )
+            self._panel_field(
+                "notes", notes, notes.toPlainText, save_labels,
+                wide=True,
+            )
+            self._panel_save_bar()
         elif kind == "watchdog":
             model, action = payload
             self._panel_title(badge, f"Watchdog - {model}")
             self._panel_row("model", model)
-            self._panel_row("on timeout", action)
-            hint = QLabel(
-                "The guest must run a watchdog daemon; if it stops petting the "
-                "device, the host takes the action above."
+            on_timeout = QComboBox()
+            on_timeout.addItems(list(WATCHDOG_ACTIONS))
+            on_timeout.setCurrentText(action)
+            self._panel_field(
+                "on timeout", on_timeout, on_timeout.currentText,
+                lambda v: svc_set_watchdog_action(self.uuid, v),
+                "The guest has to run a watchdog daemon. If it stops petting "
+                "the device, the host takes this action.",
             )
-            hint.setWordWrap(True)
-            hint.setObjectName("ConsoleHint")
-            self.hw_panel.addWidget(hint)
+            self._panel_save_bar()
             self._panel_actions(
-                _ghost("Change action…", self._edit_watchdog),
                 _ghost("Remove", lambda: self._remove_simple("watchdog")),
             )
         elif kind == "redir":
@@ -691,8 +1047,16 @@ class HardwareMixin:
             )
         elif kind == "audio":
             self._panel_title(badge, f"Audio output - {payload}")
-            self._panel_row("backend", str(payload))
-            self._panel_actions(_ghost("Change backend…", self._edit_audio))
+            backend = QComboBox()
+            backend.addItems(list(AUDIO_BACKENDS))
+            backend.setCurrentText(str(payload) or "spice")
+            self._panel_field(
+                "backend", backend, backend.currentText,
+                lambda v: svc_add_audio(self.uuid, v),
+                "Where the emulated sound card's output goes on this host. "
+                "spice sends it down the console connection.",
+            )
+            self._panel_save_bar()
         elif kind == "dimm":
             self._panel_title(badge, f"Memory device - {payload} MiB")
             self._panel_row("size", f"{payload} MiB")
@@ -714,10 +1078,16 @@ class HardwareMixin:
             self._panel_title(badge, f"{ctype} controller {index}")
             self._panel_row("type", ctype)
             self._panel_row("index", str(index))
-            self._panel_row("model", model)
-            self._panel_actions(
-                _ghost("Change model…", lambda: self._edit_controller(ctype, index, model))
+            options = CONTROLLER_MODELS.get(ctype, [])
+            choice = QComboBox()
+            choice.addItems(options if model in options else [model, *options])
+            choice.setCurrentText(model)
+            self._panel_field(
+                "model", choice, choice.currentText,
+                lambda v: svc_set_controller_model(self.uuid, ctype, index, v),
+                "Takes effect at the next start.",
             )
+            self._panel_save_bar()
         elif kind == "fs":
             f = payload
             self._panel_title(badge, f"Shared folder - {f.tag}")
@@ -727,9 +1097,513 @@ class HardwareMixin:
             self._panel_actions(_ghost("Remove", self._remove_share))
         self.hw_panel.addStretch(1)
 
-    def _install_menu(self, anchor: QPushButton) -> None:
-        if not self.uuid or not self._hw:
+    def _pci_option_fields(self, dev) -> None:
+        """ROM BAR and video BIOS file, with the dump beside the field.
+
+        Dumping is an action rather than a property - it reads the card and
+        writes a file - so it stays a button, but it fills in the field it
+        belongs to instead of living in a separate window.
+        """
+        rombar = QCheckBox("Exposed to the guest")
+        rombar.setChecked(dev.rom_bar)
+        rom_file = QLineEdit(dev.rom_file)
+        rom_file.setPlaceholderText("no vBIOS file - the card's own ROM is used")
+
+        def save_pci(_v) -> str:
+            return svc_set_hostdev_options(
+                self.uuid, "pci", dev.ident,
+                rombar=rombar.isChecked(), rom_file=rom_file.text().strip(),
+            )
+
+        self._panel_field(
+            "option rom", rombar, rombar.isChecked, save_pci,
+            "Turn it off when a passed-through GPU's video BIOS stops the "
+            "guest from booting.",
+        )
+
+        holder = QWidget()
+        row = QHBoxLayout(holder)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(6)
+        row.addWidget(rom_file, 1)
+        dump = QPushButton("Dump…")
+        dump.setProperty("class", "GhostButton")
+        dump.setCursor(Qt.CursorShape.PointingHandCursor)
+        dump.clicked.connect(lambda: self._dump_rom(dev, rom_file))
+        row.addWidget(dump)
+        self._panel_field(
+            "vbios", holder, rom_file.text, save_pci,
+            "Some cards - consumer NVIDIA especially - will not initialise in "
+            "a guest unless it is handed a copy of their video BIOS. Dump "
+            "reads it from the card and trims it to the legacy image a guest "
+            "looks for; the card must not be in use, so do it with the "
+            "machine shut down, ideally before the host driver has claimed it.",
+        )
+        rom_file.textEdited.connect(self._field_touched)
+        self._panel_save_bar()
+
+    def _dump_rom(self, dev, rom_file) -> None:
+        """Read the card's ROM as root, then trim it to the legacy image."""
+        from PySide6.QtWidgets import QFileDialog
+
+        dest, _ = QFileDialog.getSaveFileName(
+            self, "Save the video BIOS as",
+            f"{dev.ident.replace(':', '_')}.rom", "ROM images (*.rom)",
+        )
+        if not dest:
             return
+
+        def work():
+            message = svc_dump_rom(dev.ident, dest)
+            with open(dest, "rb") as f:
+                data = f.read()
+            trimmed = trim_rom_to_legacy(data)
+            note = ""
+            if trimmed != data:
+                with open(dest, "wb") as f:
+                    f.write(trimmed)
+                note = f" · trimmed to its {len(trimmed) // 1024} KB legacy image"
+            ids = read_device_ids(dev.ident)
+            if not rom_matches_device(trimmed, ids):
+                note += (
+                    f" · warning: the ROM does not name {ids.ident}, so it may "
+                    "belong to another card"
+                )
+            return message + note
+
+        def filled(message) -> None:
+            rom_file.setText(dest)
+            rom_file.textEdited.emit(dest)  # so Save notices
+            self.hw_status.setText(str(message))
+
+        self.hw_status.setText("reading the card's ROM…")
+        run_task(work, done=filled, failed=self._hw_failed)
+
+    def _show_nic_detail(self, badge: str, n) -> None:
+        """MAC, model, link state and filter, in place.
+
+        MAC and model are one libvirt write and the filter is another, so
+        they have separate appliers - a filter that will not attach should
+        not take a MAC change down with it.
+        """
+        self._panel_title(badge, f"Network interface - {n.source or 'direct'}")
+        self._panel_row("network", n.source or " - ")
+
+        mac = QLineEdit(n.mac)
+        mac.setPlaceholderText("52:54:00:…")
+        model = QComboBox()
+        known = ["virtio", "e1000e", "e1000", "rtl8139"]
+        model.addItems(known if n.model in known else [n.model, *known])
+        model.setCurrentText(n.model)
+        link = QCheckBox("Connected")
+        link.setChecked(n.link_up)
+
+        def save_nic(_v) -> str:
+            typed = mac.text().strip()
+            return svc_set_nic(
+                self.uuid, n.mac,
+                new_mac=typed if typed.lower() != n.mac.lower() else None,
+                model=model.currentText() if model.currentText() != n.model else None,
+                link_up=link.isChecked(),
+            )
+
+        self._panel_field(
+            "mac", mac, mac.text, save_nic,
+            "The guest sees this as the card's hardware address, and a DHCP "
+            "reservation is usually keyed on it.",
+        )
+        self._panel_field("model", model, model.currentText, save_nic,
+                          "virtio is fastest and needs the guest's driver; "
+                          "e1000e is what an unmodified guest recognises.")
+        self._panel_field(
+            "link", link, link.isChecked, save_nic,
+            "Unticking is the software equivalent of pulling the cable out - "
+            "the card stays on the machine and the guest sees it go down.",
+        )
+
+        nwfilter = QComboBox()
+        nwfilter.addItem("(none)")
+        if n.filter:
+            nwfilter.addItem(n.filter)
+        nwfilter.setCurrentText(n.filter or "(none)")
+        self._panel_field(
+            "filter", nwfilter,
+            lambda: "" if nwfilter.currentText() == "(none)" else nwfilter.currentText(),
+            lambda v: svc_set_nic_filter(self.uuid, mac.text().strip() or n.mac,
+                                         v, ""),
+            "A libvirt network filter, applied by the host to everything this "
+            "card sends and receives.",
+        )
+        self._fill_nic_choices(nwfilter, n.filter)
+        self._panel_save_bar()
+        self._panel_actions(_ghost("Remove", self._remove_nic))
+
+    def _fill_nic_choices(self, combo, current: str) -> None:
+        """The filters this host defines, once they have been read."""
+        from shiboken6 import isValid
+
+        def show(names: list[str]) -> None:
+            if not isValid(combo):
+                return
+            combo.blockSignals(True)
+            combo.clear()
+            combo.addItems(["(none)", *names])
+            combo.setCurrentText(current or "(none)")
+            combo.blockSignals(False)
+
+        run_task(svc_nwfilter_names, done=show, failed=lambda _m: None)
+
+    def _show_cpu_detail(self, badge: str, hw) -> None:
+        """Model, topology and machine type, all in place.
+
+        libvirt takes the model and the topology in one write and the vCPU
+        count in another, so the four controls that make up the first share
+        an applier and the count is derived from them rather than typed -
+        a topology and a vCPU count that disagree is a machine that will
+        not start.
+        """
+        self._panel_title(badge, "Processor")
+
+        mode = QComboBox()
+        mode.addItems(["host-passthrough", "host-model", "custom"])
+        mode.setCurrentText(
+            hw.cpu_mode if hw.cpu_mode in
+            ("host-passthrough", "host-model", "custom") else "custom"
+        )
+        sockets, cores, threads = hw.topology or (1, max(hw.vcpus, 1), 1)
+        host_cpus = self.host.cpus if self.host else 64
+        spins = {}
+        for name, value in (("sockets", sockets), ("cores", cores),
+                            ("threads", threads)):
+            spin = QSpinBox()
+            spin.setRange(1, max(host_cpus, value))
+            spin.setValue(value)
+            spins[name] = spin
+        total = QLabel("")
+        total.setProperty("class", "ChartValue")
+
+        def recount(*_a) -> None:
+            n = (spins["sockets"].value() * spins["cores"].value()
+                 * spins["threads"].value())
+            total.setText(f"= {n} vcpu" + ("s" if n != 1 else ""))
+
+        def save_cpu(_v) -> str:
+            topo = (spins["sockets"].value(), spins["cores"].value(),
+                    spins["threads"].value())
+            messages = [svc_set_cpu(self.uuid, mode.currentText(), *topo)]
+            wanted = topo[0] * topo[1] * topo[2]
+            if wanted != hw.vcpus:
+                messages.append(svc_set_vcpus(self.uuid, wanted))
+            return messages[-1]
+
+        self._panel_field(
+            "model", mode, mode.currentText, save_cpu,
+            "host-passthrough is fastest; host-model still migrates to a "
+            "different CPU; custom is the most compatible and the slowest. "
+            "Takes effect at the next start.",
+        )
+        # One row each rather than three side by side: together they wanted
+        # more width than the panel has, and the panel then clipped rather
+        # than scrolled.
+        for name, note in (
+            ("sockets", "Physical packages. More than one only matters to a "
+                        "guest that counts licences per socket."),
+            ("cores", "Cores per socket."),
+            ("threads", "Hardware threads per core - 2 to mirror a host with "
+                        "SMT, 1 to hide it from the guest."),
+        ):
+            self._panel_field(name, spins[name], spins[name].value, save_cpu,
+                              note)
+            spins[name].valueChanged.connect(recount)
+        recount()
+        self._panel_field(
+            "vcpus", total, lambda: None, None,
+            "The three above multiplied together. The count applies live "
+            "where the guest supports it; the shape does not.",
+        )
+
+        machine = QComboBox()
+        machine.addItem(hw.machine)
+        machine.setCurrentText(hw.machine)
+        self._panel_field(
+            "machine", machine, machine.currentText,
+            lambda v: svc_set_machine_type(self.uuid, v),
+            "q35 is the modern chipset, i440fx suits very old guests. "
+            "Changing it on a machine with an installed guest can stop it "
+            "booting.",
+        )
+        self._fill_machine_types(machine)
+
+        self._panel_save_bar()
+        self._panel_row("firmware", hw.firmware)
+        self._panel_row("hypervisor", hw.hypervisor or " - ")
+        self._panel_row("architecture", hw.arch or " - ")
+        self._panel_row("emulator", hw.emulator or " - ")
+        self._panel_row("uuid", hw.uuid or " - ")
+
+    def _fill_machine_types(self, combo) -> None:
+        """The chipsets this host's QEMU offers, read once and kept.
+
+        A libvirt capabilities read is too slow to do every time a row is
+        clicked, so the combo starts holding only the current value and
+        gains the rest when the list arrives.
+        """
+        from shiboken6 import isValid
+
+        def show(types: list[str]) -> None:
+            # The read is async: the row may have been clicked away from,
+            # taking the combo with it, before the list arrives.
+            if not isValid(combo) or not types:
+                return
+            current = combo.currentText()
+            combo.blockSignals(True)
+            combo.clear()
+            combo.addItems(types if current in types else [current, *types])
+            combo.setCurrentText(current)
+            combo.blockSignals(False)
+
+        if getattr(self, "_machine_types", None):
+            show(self._machine_types)
+            return
+
+        def keep(types: list[str]) -> None:
+            self._machine_types = types
+            show(types)
+
+        run_task(svc_machine_types, done=keep, failed=lambda _m: None)
+
+    def _show_memory_detail(self, badge: str, hw) -> None:
+        self._panel_title(badge, "Memory")
+        host_mb = self.host.memory_mb if self.host else 262144
+        # 128 MiB is a sensible smallest thing to ask for, but a machine that
+        # is already smaller has to stay editable: a floor above its current
+        # size silently raises the value the moment the faceplate is drawn.
+        floor = max(1, min(128, hw.memory_mb, hw.max_memory_mb))
+        ceiling = max(host_mb, hw.max_memory_mb, hw.memory_mb)
+        current = QSpinBox()
+        current.setRange(floor, ceiling)
+        current.setSingleStep(512)
+        current.setSuffix(" MiB")
+        current.setValue(hw.memory_mb)
+        maximum = QSpinBox()
+        maximum.setRange(floor, ceiling)
+        maximum.setSingleStep(512)
+        maximum.setSuffix(" MiB")
+        maximum.setValue(hw.max_memory_mb)
+
+        def save_memory(_v) -> str:
+            top = maximum.value()
+            return svc_set_memory(self.uuid, min(current.value(), top), top)
+
+        self._panel_field(
+            "current", current, current.value, save_memory,
+            "Balloons live while the machine runs. It cannot go above the "
+            "maximum, and asking for more than that quietly gets the maximum.",
+        )
+        self._panel_field(
+            "maximum", maximum, maximum.value, save_memory,
+            "Only changes across a restart: it is the size of the address "
+            "space the guest is given at boot.",
+        )
+        shared = QCheckBox("Mappable by the host")
+        shared.setChecked(hw.shared_memory)
+        self._panel_field(
+            "shared", shared, shared.isChecked,
+            lambda on: svc_set_shared_memory(self.uuid, on),
+            "virtiofs shared folders and Looking Glass both need the guest's "
+            "memory to be mappable by another process on the host. Takes "
+            "effect at the next start.",
+        )
+        self._panel_save_bar()
+
+    def _show_boot_detail(self, badge: str, hw) -> None:
+        """Tick devices on and off, and move them, without a dialog.
+
+        The order is held as a draft while it is being rearranged: the
+        arrows and the tick boxes both rewrite it, so what is dirty is the
+        list rather than any one control. Discard drops the draft.
+        """
+        self._panel_title(badge, "Boot order")
+        if self._boot_draft is None:
+            self._boot_draft = [
+                (entry, entry in (hw.boot or ()))
+                for entry in _boot_candidates(hw)
+            ]
+        draft = self._boot_draft
+
+        def move(index: int, delta: int) -> None:
+            target = index + delta
+            if not 0 <= target < len(draft):
+                return
+            draft[index], draft[target] = draft[target], draft[index]
+            self._show_hw_detail()
+
+        def toggle(index: int, on: bool) -> None:
+            draft[index] = (draft[index][0], on)
+            self._field_touched()
+
+        position = 0
+        for i, (entry, on) in enumerate(draft):
+            if on:
+                position += 1
+            holder = QWidget()
+            row = QHBoxLayout(holder)
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(6)
+            box = QCheckBox(_boot_label(entry))
+            box.setChecked(on)
+            box.toggled.connect(lambda v, _i=i: toggle(_i, v))
+            row.addWidget(box, 1)
+            for up, delta, usable in ((True, -1, i > 0),
+                                      (False, 1, i < len(draft) - 1)):
+                arrow = QPushButton()
+                arrow.setIcon(_arrow_icon(
+                    up, theme.TEXT if usable else theme.TEXT_FAINT
+                ))
+                arrow.setProperty("class", "GhostButton")
+                arrow.setFixedWidth(30)
+                arrow.setEnabled(usable)
+                arrow.setToolTip("Move up" if up else "Move down")
+                arrow.setCursor(Qt.CursorShape.PointingHandCursor)
+                arrow.clicked.connect(lambda _=False, _i=i, _d=delta: move(_i, _d))
+                row.addWidget(arrow)
+            self._panel_control(f"{position}." if on else "off", holder)
+
+        self._panel_watch(
+            lambda: tuple(e for e, on in draft if on),
+            tuple(hw.boot or ()),
+            lambda order: svc_set_boot_order(self.uuid, list(order)),
+        )
+        menu = QCheckBox("Offered at startup")
+        menu.setChecked(hw.boot_menu)
+        self._panel_field(
+            "boot menu", menu, menu.isChecked,
+            lambda v: svc_set_boot_menu(self.uuid, v),
+            "The firmware waits a moment for Esc or F12 so you can pick "
+            "something other than the first entry.",
+        )
+        self._panel_save_bar()
+
+    def _show_display_detail(self, badge: str, g) -> None:
+        """A display, with everything about it editable in place.
+
+        None of it can hot-plug, so every field here lands at the next
+        start. Password and listen address are the two that matter for
+        reaching it from another machine, and they are the two people
+        most often go to raw XML for.
+        """
+        self._panel_title(badge, f"{g.type.upper()} display")
+
+        gtype = QComboBox()
+        gtype.addItems(["spice", "vnc"])
+        gtype.setCurrentText(g.type)
+        self._panel_field(
+            "type", gtype, gtype.currentText,
+            lambda v: svc_set_display_type(self.uuid, g.type, v),
+            "SPICE carries the clipboard, USB redirection and audio; VNC is "
+            "reachable from anything.",
+        )
+
+        listen = QComboBox()
+        listen.addItems(["address", "socket", "none"])
+        listen.setCurrentText(g.listen_type or "address")
+        self._panel_field(
+            "listen", listen, listen.currentText,
+            lambda v: svc_set_graphics(self.uuid, g.type, g.ident,
+                                       listen_type=v),
+            "none is what a machine with its GPU handed over wants: the "
+            "display exists for the agent's channel and listens nowhere.",
+        )
+
+        address = QComboBox()
+        address.setEditable(True)
+        address.addItems(["127.0.0.1", "0.0.0.0", "::"])
+        address.setCurrentText(g.address or "127.0.0.1")
+        self._panel_field(
+            "address", address, address.currentText,
+            lambda v: svc_set_graphics(self.uuid, g.type, g.ident,
+                                       listen_type="address", address=v),
+            "0.0.0.0 puts the console on the network. Without a password "
+            "that is an open seat at the machine's keyboard.",
+        )
+
+        auto = QCheckBox("Chosen by libvirt")
+        auto.setChecked(g.autoport)
+        self._panel_field(
+            "auto port", auto, auto.isChecked,
+            lambda v: svc_set_graphics(self.uuid, g.type, g.ident, autoport=v),
+            "libvirt hands out the first free port from 5900 up at each "
+            "start, so the console's port moves between runs.",
+        )
+        port = QSpinBox()
+        port.setRange(-1, 65535)
+        port.setValue(g.port)
+        port.setSpecialValueText("automatic")
+        self._panel_field(
+            "port", port, port.value,
+            lambda v: svc_set_graphics(self.uuid, g.type, g.ident, port=v),
+            "Setting a port turns the automatic choice off, or the port "
+            "would be ignored.",
+        )
+
+        password = QLineEdit(g.password)
+        password.setEchoMode(QLineEdit.EchoMode.Password)
+        password.setPlaceholderText("no password")
+        show = QCheckBox("Show")
+        show.toggled.connect(lambda on: password.setEchoMode(
+            QLineEdit.EchoMode.Normal if on else QLineEdit.EchoMode.Password
+        ))
+        holder = QWidget()
+        row = QHBoxLayout(holder)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.addWidget(password, 1)
+        row.addWidget(show)
+        self._panel_field(
+            "password", holder, password.text,
+            lambda v: svc_set_graphics(self.uuid, g.type, g.ident, password=v),
+            "Asked for on connecting. Stored in the definition as plain "
+            "text, which anyone who can read the machine's XML can see.",
+        )
+        password.textEdited.connect(self._field_touched)
+
+        gl = QCheckBox("Enabled")
+        gl.setChecked(g.gl)
+        self._panel_field(
+            "opengl", gl, gl.isChecked,
+            lambda v: svc_set_graphics(self.uuid, g.type, g.ident, gl=v),
+            "Renders on the host GPU and hands over the buffer. It needs a "
+            "virtio video adapter, and it only works locally - a display "
+            "with OpenGL on cannot be reached over the network.",
+        )
+        self._panel_save_bar()
+
+        hint = QLabel(
+            "The Console tab connects to this display. With both a VNC "
+            "and a SPICE display it uses the VNC one, so remove that to "
+            "work over SPICE - which is what the shared clipboard needs."
+        )
+        hint.setWordWrap(True)
+        hint.setObjectName("ConsoleHint")
+        self.hw_panel.addWidget(hint)
+        self._panel_actions(
+            _ghost("Remove", lambda: self._remove_display(g.type, g.ident)),
+        )
+
+    def _install_menu(self, anchor: QPushButton) -> None:
+        menu = self._build_install_menu()
+        if menu is not None:
+            menu.exec(anchor.mapToGlobal(anchor.rect().bottomLeft()))
+
+    def _build_install_menu(self):
+        """Everything that can be added to this machine, minus what it has.
+
+        Separate from showing it so a test can walk the whole menu: exec()
+        blocks, so anything only reached while it is open - a submenu built
+        from the machine's current devices, say - is otherwise unreachable
+        from the suite.
+        """
+        if not self.uuid or not self._hw:
+            return None
         uuid = self.uuid
         menu = QMenu(self)
         menu.addAction("Disk…", self._add_disk)
@@ -800,7 +1674,7 @@ class HardwareMixin:
                     ),
                 )
         displays = menu.addMenu("Display")
-        have = {t for t, _p in self._hw.graphics}
+        have = {g.type for g in self._hw.graphics}
         for gtype in ("vnc", "spice"):
             if gtype not in have:
                 displays.addAction(
@@ -810,7 +1684,7 @@ class HardwareMixin:
                         done=self._hw_done, failed=self._hw_failed,
                     ),
                 )
-        menu.exec(anchor.mapToGlobal(anchor.rect().bottomLeft()))
+        return menu
 
     def _add_mdev(self) -> None:
         uuid = self.uuid
@@ -1179,11 +2053,13 @@ class HardwareMixin:
         self._virtio_status("downloading virtio-win…")
         downloader = ImageDownloader(VIRTIO_WIN)
         self._virtio_downloader = downloader
-        downloader.progress.connect(
-            lambda _pct, text: self._virtio_status(f"virtio-win: {text}")
+        connect_guarded(
+            downloader.progress,
+            lambda _pct, text: self._virtio_status(f"virtio-win: {text}"),
         )
-        downloader.failed.connect(
-            lambda m: self._virtio_status(f"virtio-win download failed: {m}")
+        connect_guarded(
+            downloader.failed,
+            lambda m: self._virtio_status(f"virtio-win download failed: {m}"),
         )
 
         def imported(path: str) -> None:
@@ -1367,6 +2243,7 @@ class HardwareMixin:
         hugepages = dialog.hugepage_size_kb()
         iothreads = dialog.iothread_count()
         throttles = dialog.throttles()
+        shares, cap_pct = _tuning_cpu_limits(dialog)
         before = self._tuning
 
         def work():
@@ -1381,6 +2258,8 @@ class HardwareMixin:
                 messages.append(svc_set_hugepages(uuid, hugepages))
             if iothreads != before.iothreads:
                 messages.append(svc_set_iothreads(uuid, iothreads))
+            if (shares, cap_pct) != (before.cpu_shares, before.cpu_cap_pct):
+                messages.append(svc_set_cpu_limits(uuid, shares, cap_pct))
             for dev, limits in throttles.items():
                 if limits != before.throttles.get(dev, type(limits)()):
                     messages.append(svc_set_disk_throttle(uuid, dev, limits))
@@ -1395,79 +2274,33 @@ class HardwareMixin:
                               ErrorDialog(self, "Tuning failed", m).exec()),
         )
 
-    def _edit_cpu(self) -> None:
-        if not self._hw or not self.uuid:
-            return
-        hw, uuid = self._hw, self.uuid
-        dialog = CpuDialog(
-            self, hw, host_cpus=self.host.cpus if self.host else 64
-        )
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            return
-        mode = dialog.mode.currentText()
-        topo = (dialog.sockets.value(), dialog.cores.value(), dialog.threads.value())
-        vcpus = dialog.vcpu_count()
-        old_topo = hw.topology or (1, max(hw.vcpus, 1), 1)
-
-        def work():
-            messages = []
-            if mode != hw.cpu_mode or topo != old_topo:
-                messages.append(svc_set_cpu(uuid, mode, *topo))
-            if vcpus != hw.vcpus:
-                messages.append(svc_set_vcpus(uuid, vcpus))
-            return messages[-1] if messages else ""
-
-        run_task(work, done=self._hw_done, failed=self._hw_failed)
-
-    def _edit_memory(self) -> None:
-        if not self._hw or not self.uuid:
-            return
-        hw, uuid = self._hw, self.uuid
-        dialog = MemoryDialog(
-            self, hw, host_mem_mb=self.host.memory_mb if self.host else 262144
-        )
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            return
-        mem, max_mem = dialog.memory.value(), dialog.max_memory.value()
-        mem = min(mem, max_mem)
-        if mem == hw.memory_mb and max_mem == hw.max_memory_mb:
-            return
-        run_task(
-            lambda: svc_set_memory(uuid, mem, max_mem),
-            done=self._hw_done,
-            failed=self._hw_failed,
-        )
-
-    def _edit_video(self) -> None:
-        if not self._hw or not self.uuid:
-            return
-        uuid = self.uuid
-        dialog = VideoDialog(self, self._hw.video)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            return
-        model = dialog.model.currentText()
-        run_task(
-            lambda: svc_set_video(uuid, model),
-            done=self._hw_done,
-            failed=self._hw_failed,
-        )
-
-    def _edit_disk_cache(self) -> None:
+    def _grow_disk(self) -> None:
         sel = self._selected_device()
-        if not sel or sel[0] not in ("disk", "cdrom") or not self.uuid:
+        if not sel or sel[0] != "disk" or not self.uuid:
             self.hw_status.setText("select a disk first")
             return
         disk = sel[1]
         uuid = self.uuid
-        dialog = DiskCacheDialog(self, disk.dev, disk.cache)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            return
-        cache = dialog.cache.currentText()
-        run_task(
-            lambda: svc_set_disk_cache(uuid, disk.dev, cache),
-            done=self._hw_done,
-            failed=self._hw_failed,
-        )
+
+        def show(pools) -> None:
+            current = 0.0
+            for pool in pools:
+                for vol in pool.volumes:
+                    if vol.path == disk.source:
+                        current = vol.capacity / 1024**3
+            dialog = GrowDiskDialog(self, disk.dev, current)
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return
+            new_gb = dialog.size.value()
+            self.hw_status.setText(f"growing {disk.dev}…")
+            run_task(
+                lambda: svc_grow_disk(uuid, disk.dev, new_gb),
+                done=lambda msg: (self.hw_status.setText(str(msg)),
+                                  self._load_hardware()),
+                failed=self._hw_failed,
+            )
+
+        run_task(svc_list_pools, done=show, failed=self._hw_failed)
 
     def _move_disk(self) -> None:
         sel = self._selected_device()
@@ -1504,21 +2337,6 @@ class HardwareMixin:
             )
 
         run_task(svc_list_pools, done=show, failed=self._hw_failed)
-
-    def _edit_boot_order(self) -> None:
-        if not self._hw or not self.uuid:
-            return
-        uuid = self.uuid
-        entries = list(self._hw.boot) or ["hd"]
-        dialog = BootOrderDialog(self, entries)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            return
-        new_order = dialog.entries()
-        run_task(
-            lambda: svc_set_boot_order(uuid, new_order),
-            done=self._hw_done,
-            failed=self._hw_failed,
-        )
 
     def _add_disk(self) -> None:
         uuid = self.uuid
@@ -1583,7 +2401,7 @@ class HardwareMixin:
                 failed=self._hw_failed,
             ),
         )
-        menu.exec(self.hw_tree.mapToGlobal(self.hw_tree.rect().center()))
+        self._popup(menu)
 
     def _insert_iso(self, uuid: str, dev: str) -> None:
         if is_remote_uri(current_uri()):
@@ -1749,6 +2567,24 @@ class HardwareMixin:
             return
         self._hw_run(lambda: svc_remove_video(uuid))
 
+    def _popup_pos(self):
+        """Where a menu opened from a faceplate button belongs.
+
+        Under that button. It used to open at the centre of the device
+        list, which is a different column of the window - 600px away from
+        the pointer on a normal-sized window. sender() is the button when
+        a signal brought us here; the list is only a fallback for a call
+        that did not come from one.
+        """
+        anchor = self.sender()
+        if isinstance(anchor, QPushButton):
+            return anchor.mapToGlobal(anchor.rect().bottomLeft())
+        return self.hw_tree.mapToGlobal(self.hw_tree.rect().center())
+
+    def _popup(self, menu: QMenu) -> None:
+        menu.exec(self._popup_pos())
+
+
     def _hw_run(self, fn) -> None:
         run_task(fn, done=self._hw_done, failed=self._hw_failed)
 
@@ -1762,190 +2598,6 @@ class HardwareMixin:
         uuid = self.uuid
         if uuid:
             self._hw_run(lambda: svc_remove_simple_device(uuid, tag))
-
-    def _edit_labels(self) -> None:
-        if not self.uuid or not self._hw:
-            return
-        uuid = self.uuid
-        dialog = LabelsDialog(self, self._hw.title, self._hw.description)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            return
-        title = dialog.title_edit.text().strip()
-        notes = dialog.notes.toPlainText().strip()
-        self._hw_run(lambda: svc_set_labels(uuid, title, notes))
-
-    def _edit_machine_type(self) -> None:
-        if not self.uuid or not self._hw:
-            return
-        uuid, current = self.uuid, self._hw.machine
-
-        def show(types: list[str]) -> None:
-            dialog = ChoiceDialog(
-                self, "Machine type", "chipset / machine",
-                types or [current], current,
-                "q35 is the modern chipset; i440fx suits very old guests. "
-                "Changing this can stop an installed guest from booting.",
-            )
-            if dialog.exec() != QDialog.DialogCode.Accepted:
-                return
-            choice = dialog.value()
-            self._hw_run(lambda: svc_set_machine_type(uuid, choice))
-
-        run_task(svc_machine_types, done=show, failed=self._hw_failed)
-
-    def _toggle_boot_menu(self, enable: bool) -> None:
-        uuid = self.uuid
-        if uuid:
-            self._hw_run(lambda: svc_set_boot_menu(uuid, enable))
-
-    def _toggle_accel3d(self, enable: bool) -> None:
-        uuid = self.uuid
-        if uuid:
-            self._hw_run(lambda: svc_set_video_accel(uuid, enable))
-
-    def _edit_nic(self, nic) -> None:
-        uuid = self.uuid
-        if not uuid:
-            return
-
-        def show(networks: list[str], filters: list[str]) -> None:
-            dialog = NicEditDialog(self, nic, networks, filters)
-            if dialog.exec() != QDialog.DialogCode.Accepted:
-                return
-            new_mac = dialog.mac.text().strip()
-            model = dialog.model.currentText()
-            link_up = dialog.link_up.isChecked()
-            new_filter = dialog.chosen_filter()
-            filter_ip = (
-                dialog.filter_ip.text().strip() if dialog.filter_ip else ""
-            )
-            filter_changed = filters and (new_filter != nic.filter or filter_ip)
-
-            def apply() -> str:
-                messages = [svc_set_nic(
-                    uuid, nic.mac,
-                    new_mac=new_mac if new_mac.lower() != nic.mac.lower() else None,
-                    model=model if model != nic.model else None,
-                    link_up=link_up,
-                )]
-                if filter_changed:
-                    # the MAC may just have changed above
-                    mac_now = new_mac or nic.mac
-                    messages.append(
-                        "filter: " + svc_set_nic_filter(
-                            uuid, mac_now, new_filter, filter_ip
-                        )
-                    )
-                return " · ".join(messages)
-
-            self._hw_run(apply)
-
-        run_task(
-            svc_list_network_names,
-            done=lambda networks: run_task(
-                svc_nwfilter_names,
-                done=lambda filters: show(networks, filters),
-                failed=lambda _m: show(networks, []),
-            ),
-            failed=self._hw_failed,
-        )
-
-    def _edit_watchdog(self) -> None:
-        uuid = self.uuid
-        if not uuid or not self._hw or not self._hw.watchdog:
-            return
-        dialog = ChoiceDialog(
-            self, "Watchdog action", "on timeout", list(WATCHDOG_ACTIONS),
-            self._hw.watchdog[1],
-            "What the host does when the guest stops petting the watchdog.",
-        )
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            return
-        action = dialog.value()
-        self._hw_run(lambda: svc_set_watchdog_action(uuid, action))
-
-    def _edit_audio(self) -> None:
-        uuid = self.uuid
-        if not uuid or not self._hw:
-            return
-        dialog = ChoiceDialog(
-            self, "Audio backend", "backend", list(AUDIO_BACKENDS),
-            self._hw.audio or "spice",
-            "Where the emulated sound card's output goes on this host.",
-        )
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            return
-        backend = dialog.value()
-        self._hw_run(lambda: svc_add_audio(uuid, backend))
-
-    def _edit_controller(self, ctype: str, index: int, model: str) -> None:
-        uuid = self.uuid
-        if not uuid:
-            return
-        options = {
-            "usb": ["qemu-xhci", "nec-xhci", "ich9-ehci1", "piix3-uhci", "none"],
-            "scsi": ["virtio-scsi", "lsilogic", "megasas"],
-            "pci": ["pcie-root-port", "pcie-to-pci-bridge", "pci-bridge"],
-        }.get(ctype, [model])
-        dialog = ChoiceDialog(
-            self, f"{ctype} controller {index}", "model", options, model,
-            "Applies on next start.",
-        )
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            return
-        choice = dialog.value()
-        self._hw_run(lambda: svc_set_controller_model(uuid, ctype, index, choice))
-
-    def _edit_hostdev_options(self, dev) -> None:
-        uuid = self.uuid
-        if not uuid:
-            return
-        dialog = HostdevOptionsDialog(self, dev)
-
-        def dump(dest: str) -> None:
-            """Read the card's ROM as root, then trim it to the legacy image."""
-            def work():
-                message = svc_dump_rom(dev.ident, dest)
-                with open(dest, "rb") as f:
-                    data = f.read()
-                trimmed = trim_rom_to_legacy(data)
-                note = ""
-                if trimmed != data:
-                    with open(dest, "wb") as f:
-                        f.write(trimmed)
-                    note = (
-                        f" · trimmed to its {len(trimmed) // 1024} KB legacy "
-                        "image"
-                    )
-                ids = read_device_ids(dev.ident)
-                if not rom_matches_device(trimmed, ids):
-                    note += (
-                        f" · warning: the ROM does not name {ids.ident}, so "
-                        "it may belong to another card"
-                    )
-                return message + note
-
-            run_task(
-                work,
-                done=lambda msg: (
-                    dialog.rom_file.setText(dest),
-                    dialog.rom_status.setText(str(msg)),
-                ),
-                failed=lambda m: dialog.rom_status.setText(str(m)),
-            )
-
-        dialog.dump_requested = dump
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            return
-        rombar = dialog.rombar.isChecked() if dev.kind == "pci" else None
-        policy = dialog.policy.currentText() if dev.kind == "usb" else None
-        rom_file = dialog.rom_file.text().strip() if dev.kind == "pci" else None
-        self._hw_run(
-            lambda: svc_set_hostdev_options(
-                uuid, dev.kind, dev.ident, rombar=rombar,
-                startup_policy=policy, rom_file=rom_file,
-            )
-        )
 
     def _add_memory_device(self) -> None:
         uuid = self.uuid

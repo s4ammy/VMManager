@@ -200,7 +200,6 @@ def test_diff_ignores_formatting(testconn, domain, store):
 def test_libvirt_namespace_prefixes_survive():
     """ElementTree invents ns0 unless the prefixes are registered, which makes
     a diff of a machine with libosinfo metadata unreadable."""
-    import xml.etree.ElementTree as ET
 
     from vmmanager.core.modes import canonical
 

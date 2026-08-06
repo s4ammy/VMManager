@@ -106,3 +106,34 @@ def test_no_agent_means_no_resize(qapp):
     client._active = True
     assert client.request_guest_resolution(1280, 800) is False
     assert main.calls == []
+
+
+# -- USB redirection
+
+
+def test_no_session_means_no_devices_to_offer(qapp):
+    """The menu asks whether the console is connected before it asks the
+    session anything, so a disconnected console offers nothing rather than
+    raising."""
+    client = SpiceClient()
+    assert client.usb_devices() == []
+    client.redirect_usb(object(), True)  # must be a no-op, not a crash
+
+
+def test_the_menu_says_so_when_there_is_nothing_to_redirect(qapp, testconn):
+    from PySide6.QtWidgets import QMenu
+
+    from vmmanager.pages.detail import DetailPage
+
+    page = DetailPage()
+    page.spice._active = True          # pretend the console is up
+    page.console_stack.setCurrentWidget(page.spice)
+    menu = QMenu()
+    page._add_usb_menu(menu)
+    labels = [a.text() for a in menu.actions()]
+    assert labels == ["USB device"]
+    submenu = menu.actions()[0].menu()
+    entries = [a.text() for a in submenu.actions()]
+    assert entries == ["No USB devices to redirect"]
+    assert not submenu.actions()[0].isEnabled()
+    page.shutdown()

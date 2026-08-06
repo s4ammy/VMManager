@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import time
 import xml.etree.ElementTree as ET
 
 import libvirt

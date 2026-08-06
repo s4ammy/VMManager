@@ -120,3 +120,26 @@ def _destroy_widgets_after_each_test():
     # processEvents() deliberately skips deferred deletes, so ask for them
     app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
     app.processEvents()
+
+
+@pytest.fixture
+def scratch_settings(tmp_path):
+    """QSettings pointed somewhere disposable.
+
+    What it writes to otherwise is the user's own configuration, which a test
+    has no business editing. Qt settles on the config directory the first time
+    anything asks for it, so the environment is too late by the time the suite
+    is running: setPath is what still moves it.
+    """
+    from pathlib import Path
+
+    from PySide6.QtCore import QSettings
+
+    fmt = QSettings.Format.NativeFormat
+    scope = QSettings.Scope.UserScope
+    real = Path(QSettings("vmmanager", "vmmanager").fileName()).parent.parent
+    QSettings.setPath(fmt, scope, str(tmp_path))
+    where = QSettings("vmmanager", "vmmanager").fileName()
+    assert where.startswith(str(tmp_path)), f"settings still going to {where}"
+    yield tmp_path
+    QSettings.setPath(fmt, scope, str(real))

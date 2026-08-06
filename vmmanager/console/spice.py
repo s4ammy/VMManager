@@ -83,6 +83,7 @@ class SpiceClient(QWidget):
     mouse_mode_changed = Signal(int)  # MOUSE_SERVER | MOUSE_CLIENT
     capture_changed = Signal(bool)  # pointer captured for relative mode
     grab_changed = Signal(bool)  # keyboard handed to the guest
+    usb_changed = Signal(str)  # a redirection settled; text is any error
 
     MOUSE_SERVER, MOUSE_CLIENT = 1, 2
 
@@ -709,6 +710,48 @@ class SpiceClient(QWidget):
 
     def focusNextPrevChild(self, _next: bool) -> bool:
         return False
+
+    # -- USB redirection (needs a <redirdev> on the machine)
+
+    def usb_devices(self) -> list:
+        """(device, label, connected) for every USB device on this host.
+
+        Redirection sends the device itself over the SPICE connection, so
+        the guest gets the real thing without it being detached from the
+        host permanently - unplug it here and it comes back.
+        """
+        if self._session is None or not SPICE_AVAILABLE:
+            return []
+        try:
+            manager = Spice.UsbDeviceManager.get(self._session)
+            out = []
+            for device in manager.get_devices():
+                out.append((
+                    device,
+                    device.get_description("%s %s"),
+                    bool(manager.is_device_connected(device)),
+                ))
+            return out
+        except Exception:  # noqa: BLE001 - no usbredir support on this build
+            return []
+
+    def redirect_usb(self, device, connect: bool = True) -> None:
+        """Send a host USB device to the guest, or take it back."""
+        if self._session is None or not SPICE_AVAILABLE:
+            return
+        manager = Spice.UsbDeviceManager.get(self._session)
+        if connect:
+            manager.connect_device_async(device, None, self._usb_done, None)
+        else:
+            manager.disconnect_device(device)
+            self.usb_changed.emit("")
+
+    def _usb_done(self, manager, result, _data) -> None:
+        try:
+            manager.connect_device_finish(result)
+            self.usb_changed.emit("")
+        except Exception as e:  # noqa: BLE001 - the guest may refuse it
+            self.usb_changed.emit(str(e))
 
     # -- clipboard (needs spice-vdagent in the guest)
 

@@ -16,12 +16,12 @@ Two routes, because neither covers every case:
 from __future__ import annotations
 
 import shutil
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import libvirt
 
 from .connection import _with_conn
-from .guest import _agent_cmd, svc_guest_exec
+from .guest import svc_guest_exec
 
 try:  # pragma: no cover - depends on the host having libguestfs
     import guestfs  # type: ignore

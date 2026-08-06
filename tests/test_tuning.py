@@ -435,3 +435,59 @@ def test_the_manual_fields_only_show_in_manual_mode(tuning_dialog, qapp):
     assert not d._manual_row.isVisible()
     d.topology_mode.setCurrentIndex(2)
     assert d._manual_row.isVisible()
+
+
+# -- how much host CPU a machine may take
+
+
+def test_shares_and_a_ceiling_round_trip(testconn, domain):
+    from vmmanager.libvirt_service import svc_get_tuning, svc_set_cpu_limits
+
+    uuid = domain.UUIDString()
+    svc_set_cpu_limits(uuid, shares=2048, cap_pct=50)
+    t = svc_get_tuning(uuid)
+    assert t.cpu_shares == 2048
+    # a ceiling is quota microseconds out of period microseconds, per vCPU
+    assert (t.cpu_quota, t.cpu_period) == (50000, 100000)
+    assert t.cpu_cap_pct == 50
+
+
+def test_clearing_them_leaves_nothing_behind(testconn, domain):
+    import xml.etree.ElementTree as ET
+
+    import libvirt
+
+    from vmmanager.libvirt_service import svc_get_tuning, svc_set_cpu_limits
+
+    uuid = domain.UUIDString()
+    svc_set_cpu_limits(uuid, shares=2048, cap_pct=50)
+    svc_set_cpu_limits(uuid, shares=0, cap_pct=0)
+    t = svc_get_tuning(uuid)
+    assert (t.cpu_shares, t.cpu_quota, t.cpu_cap_pct) == (0, 0, 0)
+    root = ET.fromstring(domain.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE))
+    assert root.find("cputune/shares") is None
+    assert root.find("cputune/quota") is None
+
+
+def test_pinning_does_not_throw_the_limits_away(testconn, domain):
+    """They share the <cputune> element, which pinning rebuilds from
+    scratch - so setting a pin used to wipe a ceiling silently."""
+    from vmmanager.libvirt_service import (
+        svc_get_tuning, svc_set_cpu_limits, svc_set_cpu_pinning,
+    )
+
+    uuid = domain.UUIDString()
+    svc_set_cpu_limits(uuid, shares=4096, cap_pct=25)
+    svc_set_cpu_pinning(uuid, {0: (1,)})
+    t = svc_get_tuning(uuid)
+    assert t.cpu_shares == 4096, "pinning dropped the weight"
+    assert t.cpu_cap_pct == 25, "pinning dropped the ceiling"
+    assert t.vcpu_pins == {0: (1,)}
+
+
+@pytest.mark.parametrize("shares,cap", [(1, 0), (300000, 0), (0, 101), (0, -5)])
+def test_values_outside_what_libvirt_takes_are_refused(shares, cap):
+    from vmmanager.libvirt_service import svc_set_cpu_limits
+
+    with pytest.raises(ValueError):
+        svc_set_cpu_limits("no-uuid", shares=shares, cap_pct=cap)

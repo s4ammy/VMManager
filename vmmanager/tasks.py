@@ -61,6 +61,21 @@ def _to_whoever_is_left(callback):
     return deliver
 
 
+def connect_guarded(signal, slot) -> None:
+    """Connect a worker thread's signal so a late emission cannot crash.
+
+    run_task already wraps its own callbacks, but a QThread's signals do
+    not go through it, and connecting a plain function to one leaves Qt
+    with nothing to disconnect when the widgets that function touches are
+    destroyed: a download that finishes after its page has gone then
+    writes into deleted widgets and raises out of the event loop.
+
+    Use this wherever a worker outlives what it reports to. A bound method
+    of a QObject is already safe - Qt drops those connections itself.
+    """
+    signal.connect(_to_whoever_is_left(slot))
+
+
 def run_task(fn, done=None, failed=None) -> None:
     task = Task(fn)
     _live.add(task)

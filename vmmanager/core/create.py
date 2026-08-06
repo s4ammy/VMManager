@@ -16,7 +16,6 @@ from .xmlesc import x
 def _build_seed_iso(name: str, ci: CloudInit) -> bytes:
     """NoCloud seed ISO (volid 'cidata') built with xorrisofs."""
     import tempfile
-    from pathlib import Path
 
     users = f"""  - name: {ci.user}
     sudo: ALL=(ALL) NOPASSWD:ALL
@@ -197,12 +196,40 @@ def _import_foreign(conn, spec: CreateSpec) -> str:
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
 
+def _build_unattend_iso(name: str, spec) -> bytes:
+    """autounattend.xml on a volume Setup will look at. spec: Unattend."""
+    import tempfile
+
+    from .unattend import build_autounattend
+
+    with tempfile.TemporaryDirectory(prefix="vmm-unattend-") as tmp:
+        answer = Path(tmp) / "autounattend.xml"
+        answer.write_text(build_autounattend(spec), encoding="utf-8")
+        iso_path = Path(tmp) / "unattend.iso"
+        result = subprocess.run(
+            [
+                "xorrisofs", "-output", str(iso_path), "-volid", "UNATTEND",
+                "-joliet", "-rational-rock", "autounattend.xml",
+            ],
+            cwd=tmp, capture_output=True, text=True, timeout=120,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(
+                "xorrisofs could not build the answer disc: "
+                + (result.stderr.strip() or "no error output")
+            )
+        return iso_path.read_bytes()
+
+
 def svc_create_vm(spec: CreateSpec) -> None:
     if spec.location_url:
         svc_create_vm_from_url(spec)
         return
     seed_data = (
         _build_seed_iso(spec.name, spec.cloudinit) if spec.cloudinit else None
+    )
+    unattend_data = (
+        _build_unattend_iso(spec.name, spec.unattend) if spec.unattend else None
     )
 
     def go(conn):
@@ -266,6 +293,21 @@ def svc_create_vm(spec: CreateSpec) -> None:
       <driver name='qemu' type='raw'/>
       <source file='{x(seed_path)}'/>
       <target dev='vdz' bus='virtio'/>
+      <readonly/>
+    </disk>"""
+        if unattend_data is not None:
+            # A real cdrom, not a virtio disk like the cloud-init seed:
+            # Windows Setup looks for autounattend.xml on volumes it can
+            # see, and in WinPE that means an optical drive on a bus it has
+            # a driver for. sdb, so it lands after the install media.
+            unattend_path = svc_upload_volume_conn(
+                conn, spec.pool, f"{spec.name}-unattend.iso", unattend_data
+            )
+            cdroms += f"""
+    <disk type='file' device='cdrom'>
+      <driver name='qemu' type='raw'/>
+      <source file='{x(unattend_path)}'/>
+      <target dev='sdb' bus='sata'/>
       <readonly/>
     </disk>"""
         tpm = ""

@@ -6,7 +6,7 @@
 .venv/bin/python -m pytest -q
 ```
 
-701 tests, about 10 seconds, no display needed. They run against libvirt's own
+800 tests, about 12 seconds, no display needed. They run against libvirt's own
 fake hypervisor (`test:///default`), so they exercise the real service functions
 with real libvirt semantics and never touch a real machine. They also stay out of
 your own data - the stats database is redirected to a temporary one.
@@ -51,6 +51,10 @@ test that cannot fail is worse than no test.
 | `test_usb_rules.py` | the auto-attach plan, including never stealing a device from another guest |
 | `test_console_drop.py` | dropped-file mime handling and per-OS guest destinations |
 | `test_vfio.py` | PCI addresses that must never reach a root command line, boot-binding files, and option-ROM parsing built to the spec byte by byte |
+| `test_startcheck.py` | each reason a machine will not start, against a described host rather than a real one |
+| `test_unattend.py` | the Windows answer file: the three passes, the driver paths, and text that would break the XML |
+| `test_disk_safety.py` | deleting or rewriting a disk something else is layered on |
+| `test_late_callbacks.py` | a worker finishing after the widgets it reports to are gone |
 | `test_hooks.py` | the generated single-GPU scripts: valid shell, undone in reverse, someone else's dispatcher untouched, and isolation that can never leave the host without a CPU |
 
 Coverage is 59% of statements. The rest is mostly Qt wiring, where a unit test
@@ -94,6 +98,20 @@ vmmanager/
 
 Import services from `vmmanager.core`, or through the `libvirt_service` façade.
 Core submodules import in dependency order, with no cycles.
+
+## Linting
+
+```sh
+.venv/bin/ruff check vmmanager tests
+```
+
+Correctness rules only - pyflakes and syntax errors, configured in
+`pyproject.toml`. Not a formatter: the style and import-order rules would
+rewrite most of the tree without changing behaviour, and the import grouping
+here is deliberate. It runs in CI, and it earned its place on the first run by
+finding a name used but never imported (which only raises on the path that
+reaches it) and a backslash inside an f-string, which is a syntax error on the
+3.11 this package claims to support.
 
 ## Rules that the tests enforce
 

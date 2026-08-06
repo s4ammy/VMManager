@@ -17,15 +17,12 @@ from PySide6.QtWidgets import (
 )
 
 from .. import theme
-from ..dialogs import ConfirmDialog, ErrorDialog, NetworkDialog
+from ..dialogs import ConfirmDialog, ErrorDialog
 from ..libvirt_service import (
     NetworkInfo,
-    svc_create_network,
     svc_delete_network,
-    svc_get_network_def,
     svc_list_networks,
     svc_network_action,
-    svc_redefine_network,
 )
 from ..tasks import run_task
 

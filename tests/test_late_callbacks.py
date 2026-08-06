@@ -61,3 +61,60 @@ def test_a_stopped_downloader_says_nothing(qapp):
     downloader.wait(5000)
     qapp.processEvents()
     assert heard == []
+
+
+def test_a_guarded_connection_drops_a_late_answer(qapp):
+    """The general form of the fix: a worker's signal wrapped so a reply
+    arriving after its widgets are gone is dropped, not raised. Qt does
+    this itself for a bound method of a QObject, and cannot for a plain
+    function - which is what these connections are."""
+    from PySide6.QtCore import QObject, Signal
+
+    from vmmanager.tasks import connect_guarded
+
+    class _Worker(QObject):
+        done = Signal(str)
+
+    worker = _Worker()
+    landed = []
+
+    def touch_a_dead_widget(text):
+        landed.append(text)
+        raise RuntimeError(
+            "libshiboken: Internal C++ object (QLabel) already deleted."
+        )
+
+    connect_guarded(worker.done, touch_a_dead_widget)
+    worker.done.emit("late")          # must not raise
+    assert landed == ["late"]
+
+
+def test_a_real_error_still_surfaces():
+    """Only the already-deleted case is swallowed. A genuine bug in a
+    callback has to keep reaching the crash reporter, or this guard would
+    hide every fault in every worker reply.
+
+    Tested through the wrapper rather than a signal emission: pytest-qt
+    intercepts exceptions raised inside slots, so an emit would prove
+    nothing about who raised what.
+    """
+    import pytest
+
+    from vmmanager.tasks import _to_whoever_is_left
+
+    def genuinely_broken(_value):
+        raise RuntimeError("something genuinely broken")
+
+    with pytest.raises(RuntimeError, match="genuinely broken"):
+        _to_whoever_is_left(genuinely_broken)("x")
+
+
+def test_the_deleted_case_is_swallowed_by_the_same_wrapper():
+    from vmmanager.tasks import _to_whoever_is_left
+
+    def dead_widget(_value):
+        raise RuntimeError(
+            "libshiboken: Internal C++ object (QLabel) already deleted."
+        )
+
+    _to_whoever_is_left(dead_widget)("x")  # must not raise

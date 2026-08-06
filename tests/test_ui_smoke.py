@@ -12,7 +12,6 @@ gets caught here rather than under a user's cursor.
 
 from __future__ import annotations
 
-import inspect
 from pathlib import Path
 
 import pytest
@@ -21,14 +20,15 @@ import vmmanager.dialogs as dialogs
 
 PROJECT = Path(__file__).resolve().parent.parent
 from vmmanager.core.hooks import GpuHandoff, HookState
+from vmmanager.core.startcheck import StartProblem
 from vmmanager.core.models import (
     DiskInfo,
     DisplayHealth,
     DomainDisk,
     DomainSnapshot,
+    GraphicsDetail,
     Hardware,
     HostDevice,
-    HostdevInfo,
     IommuDevice,
     MdevInfo,
     MdevType,
@@ -61,29 +61,24 @@ IOMMU = IommuReport(enabled=True, devices=(
 ARGS = {
     "AttachDiskDialog": ([POOL],),
     "AttachNicDialog": (["default"],),
-    "BootOrderDialog": (["hd", "cdrom"],),
     "CatalogDialog": ([POOL],),
     "ChoiceDialog": ("Pick", "value", ["a", "b"]),
     "CloneDetailsDialog": ("base", [DISK]),
     "CloneDialog": ("base",),
     "ConfirmDialog": ("Delete", "Are you sure?", "Delete"),
     "ConnectionDialog": (),
-    "CpuDialog": (HARDWARE, 16),
     "DeleteVmDialog": ("web-01", [DISK]),
-    "DiskCacheDialog": ("vda", "none"),
     "DisplayFixDialog": ("win11", DisplayHealth(
         graphics=("spice",), video_model="vga", running=True)),
     "ErrorDialog": ("libvirt error", "something went wrong"),
     "GuestFeaturesDialog": "needs host capabilities, built in its own test below",
+    "GrowDiskDialog": ("vda", 40.0),
     "HostDeviceDialog": ([HostDevice(kind="usb", ident="1234:5678", label="A stick")],),
-    "HostdevOptionsDialog": (HostdevInfo(kind="pci", ident="0000:03:00.0"),),
-    "LabelsDialog": ("web server", "runs the site"),
     "MdevDialog": ([MdevType(parent="0000:00:02.0", type_id="i915-GVTg_V5_4",
                              name="GVTg_V5_4", api="vfio-pci", available=2)],
                    [MdevInfo(uuid="6a3c9dd2-0001-4b6e-9f1e-6f0c2f2b9d70",
                              parent="0000:00:02.0", type_id="i915-GVTg_V5_4",
                              attached_to=None)]),
-    "MemoryDialog": (HARDWARE, 65536),
     "DiffDialog": ("current vs prod", "--- current\n+++ prod\n-<vcpu>2</vcpu>\n+<vcpu>4</vcpu>"),
     "ModesDialog": ("win11", [], False),
     "MoveDiskDialog": ("vda", [POOL], "/somewhere/else/a.qcow2", True),
@@ -120,8 +115,13 @@ ARGS = {
         True, True,
     ),
     "SnapshotDialog": ("web-01",),
+    "StartCheckDialog": ("win11", [
+        StartProblem("blocked", "The disk vda is missing",
+                     "/var/lib/libvirt/images/win11.qcow2 does not exist. If "
+                     "its storage pool is on a filesystem that is not "
+                     "mounted, mounting it is the fix."),
+    ], "Cannot access storage file"),
     "TuningDialog": "needs the host topology, built in its own test below",
-    "VideoDialog": ("virtio",),
     "VirtioIsoDialog": ("/usr/share/virtio-win/virtio-win.iso",
                         ["/var/lib/libvirt/images/virtio-win.iso"], [POOL]),
     "UsbRulesDialog": ("win11",
@@ -480,7 +480,10 @@ def hardware_page(qapp, testconn):
     # A machine can hold a VNC and a SPICE display at once, and which one is
     # taken off decides which protocol the console uses - so the row carries
     # the type and port, and the remover is told which to take.
-    ("gfx", ("vnc", "-1"), "Remove display"),
+    # A real GraphicsDetail, not a stand-in pair: this row's payload changed
+    # shape once and the hand-made tuple here went on passing while the
+    # component list itself raised on the real one.
+    ("gfx", GraphicsDetail(type="vnc", ident="-1"), "Remove display"),
     ("video", None, "Remove video adapter"),
 ])
 def test_a_removable_row_offers_to_remove_it(qapp, testconn, kind, payload,
@@ -597,3 +600,39 @@ def test_the_error_banner_can_actually_be_shown(qapp):
     qapp.processEvents()
     page.show_error("could not reach libvirt")
     qapp.processEvents()
+
+
+def test_a_faceplate_menu_opens_under_its_own_button(qapp, testconn):
+    """It opened at the centre of the device list instead - a different
+    column of the window, about 600px from the pointer.
+
+    The button is connected to a bound method of the page, which is how
+    _ghost wires every faceplate button; sender() is only the button that
+    way, so a lambda here would test a wiring the app does not use.
+    """
+    from PySide6.QtWidgets import QPushButton
+
+    from vmmanager.pages.detail import DetailPage
+
+    class _Probe(DetailPage):
+        seen = None
+
+        def record(self):
+            self.seen = self._popup_pos()
+
+    page = _Probe()
+    page.resize(1100, 700)
+    page.show()
+    qapp.processEvents()
+    button = QPushButton("Change media…", page)
+    button.move(820, 300)
+    button.show()
+    button.clicked.connect(page.record)
+    qapp.processEvents()
+
+    button.click()
+    qapp.processEvents()
+    assert page.seen == button.mapToGlobal(button.rect().bottomLeft()), (
+        "the menu is not under its button"
+    )
+    page.shutdown()

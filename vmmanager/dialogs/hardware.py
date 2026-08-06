@@ -144,156 +144,8 @@ class AttachNicDialog(SizedDialog):
         box.addSpacing(6)
         box.addLayout(_buttons(self, "Add interface"))
 
-class CpuDialog(SizedDialog):
-    """Processor editor: model and topology; vCPUs follow the topology."""
 
-    def __init__(self, parent, hw, host_cpus: int) -> None:
-        # hw: Hardware (cpu_mode, topology, vcpus)
-        super().__init__(parent)
-        self.setWindowTitle("Processor")
-        self.setMinimumWidth(460)
-        box = QVBoxLayout(self)
-        box.setContentsMargins(24, 22, 24, 20)
-        box.setSpacing(10)
-        box.addWidget(_title("Processor"))
-        note = QLabel(
-            "vCPU count applies live when the guest allows it; model and "
-            "topology apply on the next start."
-        )
-        note.setWordWrap(True)
-        note.setProperty("class", "Dim")
-        box.addWidget(note)
 
-        box.addWidget(_field_label("model"))
-        self.mode = QComboBox()
-        self.mode.addItems(["host-passthrough", "host-model", "custom"])
-        self.mode.setCurrentText(
-            hw.cpu_mode
-            if hw.cpu_mode in ("host-passthrough", "host-model", "custom")
-            else "custom"
-        )
-        self.mode.setToolTip(
-            "host-passthrough: fastest · host-model: migration-friendly · "
-            "custom (qemu64): maximum compatibility"
-        )
-        box.addWidget(self.mode)
-
-        sockets, cores, threads = hw.topology or (1, max(hw.vcpus, 1), 1)
-        topo_row = QHBoxLayout()
-        topo_row.setSpacing(14)
-        for label, attr, value in (
-            ("sockets", "sockets", sockets),
-            ("cores", "cores", cores),
-            ("threads", "threads", threads),
-        ):
-            col = QVBoxLayout()
-            col.addWidget(_field_label(label))
-            spin = QSpinBox()
-            spin.setRange(1, max(host_cpus, value))
-            spin.setValue(value)
-            setattr(self, attr, spin)
-            col.addWidget(spin)
-            topo_row.addLayout(col)
-        total_col = QVBoxLayout()
-        total_col.addWidget(_field_label("vcpus"))
-        self.total = QLabel("")
-        self.total.setProperty("class", "ChartValue")
-        total_col.addWidget(self.total)
-        topo_row.addLayout(total_col)
-        box.addLayout(topo_row)
-        for spin in (self.sockets, self.cores, self.threads):
-            spin.valueChanged.connect(self._recount)
-        self._recount()
-        box.addSpacing(6)
-        box.addLayout(_buttons(self, "Apply"))
-
-    def _recount(self) -> None:
-        self.total.setText(
-            f"= {self.sockets.value() * self.cores.value() * self.threads.value()}"
-        )
-
-    def vcpu_count(self) -> int:
-        return self.sockets.value() * self.cores.value() * self.threads.value()
-
-class MemoryDialog(SizedDialog):
-    """Memory editor: current (balloon) and maximum."""
-
-    def __init__(self, parent, hw, host_mem_mb: int) -> None:
-        # hw: Hardware (memory_mb, max_memory_mb)
-        super().__init__(parent)
-        self.setWindowTitle("Memory")
-        self.setMinimumWidth(440)
-        box = QVBoxLayout(self)
-        box.setContentsMargins(24, 22, 24, 20)
-        box.setSpacing(10)
-        box.addWidget(_title("Memory"))
-        note = QLabel(
-            "Current memory balloons live while the machine runs; the "
-            "maximum can only change across a restart."
-        )
-        note.setWordWrap(True)
-        note.setProperty("class", "Dim")
-        box.addWidget(note)
-        mem_row = QHBoxLayout()
-        mem_row.setSpacing(14)
-        cur_col = QVBoxLayout()
-        cur_col.addWidget(_field_label("current (MiB)"))
-        self.memory = QSpinBox()
-        self.memory.setRange(128, max(host_mem_mb, hw.max_memory_mb))
-        self.memory.setSingleStep(512)
-        self.memory.setValue(hw.memory_mb)
-        cur_col.addWidget(self.memory)
-        max_col = QVBoxLayout()
-        max_col.addWidget(_field_label("maximum (MiB)"))
-        self.max_memory = QSpinBox()
-        self.max_memory.setRange(128, max(host_mem_mb, hw.max_memory_mb))
-        self.max_memory.setSingleStep(512)
-        self.max_memory.setValue(hw.max_memory_mb)
-        max_col.addWidget(self.max_memory)
-        mem_row.addLayout(cur_col)
-        mem_row.addLayout(max_col)
-        box.addLayout(mem_row)
-        box.addSpacing(6)
-        box.addLayout(_buttons(self, "Apply"))
-
-class BootOrderDialog(SizedDialog):
-    def __init__(self, parent, entries: list[str]) -> None:
-        super().__init__(parent)
-        self.setWindowTitle("Boot order")
-        self.setMinimumWidth(420)
-        box = QVBoxLayout(self)
-        box.setContentsMargins(24, 22, 24, 20)
-        box.setSpacing(10)
-        box.addWidget(_title("Boot order"))
-        self.list = QListWidget()
-        self.list.addItems(entries)
-        if entries:
-            self.list.setCurrentRow(0)
-        box.addWidget(self.list)
-        row = QHBoxLayout()
-        up = QPushButton("Move up")
-        up.setProperty("class", "GhostButton")
-        up.clicked.connect(lambda: self._move(-1))
-        down = QPushButton("Move down")
-        down.setProperty("class", "GhostButton")
-        down.clicked.connect(lambda: self._move(1))
-        row.addWidget(up)
-        row.addWidget(down)
-        row.addStretch(1)
-        box.addLayout(row)
-        box.addSpacing(6)
-        box.addLayout(_buttons(self, "Apply order"))
-
-    def _move(self, delta: int) -> None:
-        row = self.list.currentRow()
-        if row < 0 or not 0 <= row + delta < self.list.count():
-            return
-        item = self.list.takeItem(row)
-        self.list.insertItem(row + delta, item)
-        self.list.setCurrentRow(row + delta)
-
-    def entries(self) -> list[str]:
-        return [self.list.item(i).text() for i in range(self.list.count())]
 
 class HostDeviceDialog(SizedDialog):
     """Pick a host USB or PCI device to pass through."""
@@ -396,55 +248,7 @@ class ShareFolderDialog(SizedDialog):
         if path:
             self.source.setText(path)
 
-class VideoDialog(SizedDialog):
-    def __init__(self, parent, current: str) -> None:
-        super().__init__(parent)
-        self.setWindowTitle("Video model")
-        self.setMinimumWidth(400)
-        box = QVBoxLayout(self)
-        box.setContentsMargins(24, 22, 24, 20)
-        box.setSpacing(10)
-        box.addWidget(_title("Video model"))
-        note = QLabel(
-            "virtio for modern guests, qxl for SPICE multi-monitor, "
-            "vga for ancient ones. Applies on next start."
-        )
-        note.setWordWrap(True)
-        note.setProperty("class", "Dim")
-        box.addWidget(note)
-        self.model = QComboBox()
-        self.model.addItems(["virtio", "qxl", "vga", "bochs", "ramfb", "none"])
-        if current in [self.model.itemText(i) for i in range(self.model.count())]:
-            self.model.setCurrentText(current)
-        box.addWidget(self.model)
-        box.addSpacing(6)
-        box.addLayout(_buttons(self, "Apply"))
 
-class DiskCacheDialog(SizedDialog):
-    def __init__(self, parent, dev: str, current: str) -> None:
-        super().__init__(parent)
-        self.setWindowTitle("Disk cache mode")
-        self.setMinimumWidth(420)
-        box = QVBoxLayout(self)
-        box.setContentsMargins(24, 22, 24, 20)
-        box.setSpacing(10)
-        box.addWidget(_title(f"Cache mode for {dev}"))
-        note = QLabel(
-            "none is safest for host crashes and best for raw performance; "
-            "writeback is faster for bursty writes; unsafe only for throwaway "
-            "machines. Applies on next start."
-        )
-        note.setWordWrap(True)
-        note.setProperty("class", "Dim")
-        box.addWidget(note)
-        self.cache = QComboBox()
-        self.cache.addItems(
-            ["default", "none", "writeback", "writethrough", "directsync", "unsafe"]
-        )
-        self.cache.setCurrentText(current if current else "default")
-        box.addWidget(self.cache)
-        box.addSpacing(6)
-        box.addLayout(_buttons(self, "Apply"))
 
 class MdevDialog(SizedDialog):
     """Mediated devices: the types this host offers, the instances that
@@ -545,6 +349,40 @@ class MdevDialog(SizedDialog):
         return item.data(Qt.ItemDataRole.UserRole) if item else None
 
 
+class GrowDiskDialog(SizedDialog):
+    """Make a machine's disk bigger. Growing only - see svc_grow_disk."""
+
+    def __init__(self, parent, dev: str, current_gb: float) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Grow disk")
+        self.setMinimumWidth(460)
+        box = QVBoxLayout(self)
+        box.setContentsMargins(24, 22, 24, 20)
+        box.setSpacing(10)
+        box.addWidget(_title(f"Grow {dev}"))
+        note = QLabel(
+            f"Currently {current_gb:.1f} GB. The disk is made bigger and a "
+            "running machine is told about it straight away - but the guest "
+            "still has to extend the partition and the filesystem on it "
+            "before the space is usable. On Windows that is Disk Management; "
+            "on Linux, growpart and resize2fs or xfs_growfs.\n\n"
+            "Only growing is offered here. Shrinking a disk throws away "
+            "whatever was past the new end, and the filesystem inside finds "
+            "out afterwards."
+        )
+        note.setWordWrap(True)
+        note.setProperty("class", "Dim")
+        box.addWidget(note)
+        box.addWidget(_field_label("new size (GB)"))
+        self.size = QDoubleSpinBox()
+        self.size.setRange(max(current_gb + 0.1, 0.2), 65536)
+        self.size.setDecimals(1)
+        self.size.setValue(max(current_gb + 10, current_gb + 0.1))
+        box.addWidget(self.size)
+        box.addSpacing(6)
+        box.addLayout(_buttons(self, "Grow"))
+
+
 class MoveDiskDialog(SizedDialog):
     """Pick the pool a disk's storage should move to."""
 
@@ -578,6 +416,13 @@ class MoveDiskDialog(SizedDialog):
         box.addWidget(self.delete_source)
         box.addSpacing(6)
         box.addLayout(_buttons(self, "Move"))
+
+
+def _tuning_cpu_limits(dialog) -> tuple[int, int]:
+    """(shares, cap %) as the tuning dialog has them, 0 for off."""
+    shares = dialog.cpu_shares.value() if dialog.cpu_shares_on.isChecked() else 0
+    cap = dialog.cpu_cap.value() if dialog.cpu_cap_on.isChecked() else 0
+    return shares, cap
 
 
 class PassthroughDialog(SizedDialog):
@@ -1091,188 +936,7 @@ class ChoiceDialog(SizedDialog):
         return self.combo.currentText().strip()
 
 
-class LabelsDialog(SizedDialog):
-    """A machine's human title and free-form notes."""
 
-    def __init__(self, parent, title: str, description: str) -> None:
-        super().__init__(parent)
-        from PySide6.QtWidgets import QPlainTextEdit
-
-        self.setWindowTitle("Name and notes")
-        self.setMinimumWidth(460)
-        box = QVBoxLayout(self)
-        box.setContentsMargins(24, 22, 24, 20)
-        box.setSpacing(10)
-        box.addWidget(_title("Name and notes"))
-        note = QLabel(
-            "The title is a friendly label shown alongside the machine name; "
-            "notes are for anything you want to remember about it."
-        )
-        note.setWordWrap(True)
-        note.setProperty("class", "Dim")
-        box.addWidget(note)
-        box.addWidget(_field_label("title"))
-        self.title_edit = QLineEdit(title)
-        self.title_edit.setPlaceholderText("Build server")
-        box.addWidget(self.title_edit)
-        box.addWidget(_field_label("notes"))
-        self.notes = QPlainTextEdit(description)
-        self.notes.setMinimumHeight(110)
-        box.addWidget(self.notes)
-        box.addSpacing(6)
-        box.addLayout(_buttons(self, "Save"))
-
-
-class NicEditDialog(SizedDialog):
-    """Edit an existing interface: MAC, model, link state, filter."""
-
-    def __init__(self, parent, nic, networks: list[str],
-                 filters: list[str] | None = None) -> None:
-        super().__init__(parent)
-        self.setWindowTitle("Edit network interface")
-        self.setMinimumWidth(440)
-        box = QVBoxLayout(self)
-        box.setContentsMargins(24, 22, 24, 20)
-        box.setSpacing(10)
-        box.addWidget(_title("Edit network interface"))
-        note = QLabel(
-            "The link can be pulled up or down while the machine runs - handy "
-            "for testing how software copes. MAC and model changes need a "
-            "restart."
-        )
-        note.setWordWrap(True)
-        note.setProperty("class", "Dim")
-        box.addWidget(note)
-        box.addWidget(_field_label("mac address"))
-        self.mac = QLineEdit(nic.mac)
-        box.addWidget(self.mac)
-        box.addWidget(_field_label("model"))
-        self.model = QComboBox()
-        self.model.addItems(["virtio", "e1000e", "e1000", "rtl8139"])
-        self.model.setCurrentText(nic.model)
-        box.addWidget(self.model)
-        self.link_up = QCheckBox("Link connected")
-        self.link_up.setChecked(True)
-        box.addWidget(self.link_up)
-        self.filter = None
-        self.filter_ip = None
-        if filters:
-            box.addWidget(_field_label("network filter"))
-            self.filter = QComboBox()
-            self.filter.addItem("(none)")
-            self.filter.addItems(filters)
-            if nic.filter:
-                if nic.filter not in filters:
-                    self.filter.addItem(nic.filter)
-                self.filter.setCurrentText(nic.filter)
-            box.addWidget(self.filter)
-            self.filter_ip = QLineEdit()
-            self.filter_ip.setPlaceholderText(
-                "IP for the filter (optional) - clean-traffic pins the guest "
-                "to it"
-            )
-            box.addWidget(self.filter_ip)
-        box.addSpacing(6)
-        box.addLayout(_buttons(self, "Apply"))
-
-    def chosen_filter(self) -> str:
-        if self.filter is None:
-            return ""
-        text = self.filter.currentText()
-        return "" if text == "(none)" else text
-
-
-class HostdevOptionsDialog(SizedDialog):
-    """PCI ROM BAR and USB startup policy for an assigned host device."""
-
-    def __init__(self, parent, dev) -> None:
-        super().__init__(parent)
-        self.setWindowTitle("Host device options")
-        self.setMinimumWidth(440)
-        box = QVBoxLayout(self)
-        box.setContentsMargins(24, 22, 24, 20)
-        box.setSpacing(10)
-        box.addWidget(_title(f"{dev.kind.upper()} device {dev.ident}"))
-        self.rombar = QCheckBox("Expose the device's option ROM (ROM BAR)")
-        self.rombar.setChecked(True)
-        self.policy = QComboBox()
-        self.policy.addItems(["mandatory", "requisite", "optional"])
-        self.rom_file = QLineEdit(getattr(dev, "rom_file", ""))
-        self._ident = dev.ident
-        self.dump_requested = None  # set by the caller: (dest_path) -> None
-        if dev.kind == "pci":
-            hint = QLabel(
-                "Turn the ROM off when a passed-through GPU's video BIOS stops "
-                "the guest from booting."
-            )
-            hint.setWordWrap(True)
-            hint.setProperty("class", "Dim")
-            box.addWidget(hint)
-            self.rombar.setChecked(getattr(dev, "rom_bar", True))
-            box.addWidget(self.rombar)
-            box.addSpacing(6)
-            box.addWidget(_field_label("video BIOS file"))
-            rom_hint = QLabel(
-                "Some cards - consumer NVIDIA especially - will not "
-                "initialise in a guest unless it is handed a copy of their "
-                "video BIOS. Dump reads it from the card and trims it to the "
-                "legacy image a guest looks for; the card must not be in use, "
-                "so do it with the machine shut down, ideally before the host "
-                "driver has claimed it."
-            )
-            rom_hint.setWordWrap(True)
-            rom_hint.setProperty("class", "Dim")
-            box.addWidget(rom_hint)
-            rom_row = QHBoxLayout()
-            rom_row.setSpacing(8)
-            rom_row.addWidget(self.rom_file, 1)
-            browse = QPushButton("Browse…")
-            browse.setProperty("class", "GhostButton")
-            browse.clicked.connect(self._browse_rom)
-            rom_row.addWidget(browse)
-            dump = QPushButton("Dump from card…")
-            dump.setProperty("class", "GhostButton")
-            dump.clicked.connect(self._dump_rom)
-            rom_row.addWidget(dump)
-            box.addLayout(rom_row)
-            self.rom_status = QLabel("")
-            self.rom_status.setObjectName("ConsoleHint")
-            self.rom_status.setWordWrap(True)
-            box.addWidget(self.rom_status)
-        else:
-            hint = QLabel(
-                "What happens when the device is missing at startup: mandatory "
-                "refuses to start, optional carries on without it."
-            )
-            hint.setWordWrap(True)
-            hint.setProperty("class", "Dim")
-            box.addWidget(hint)
-            box.addWidget(_field_label("startup policy"))
-            box.addWidget(self.policy)
-        box.addSpacing(6)
-        box.addLayout(_buttons(self, "Apply"))
-
-    def _browse_rom(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Choose a video BIOS file", "",
-            "ROM images (*.rom *.bin);;All files (*)",
-        )
-        if path:
-            self.rom_file.setText(path)
-
-    def _dump_rom(self) -> None:
-        """Ask where to keep it, then let the caller do the privileged read."""
-        from pathlib import Path
-
-        default = str(Path.home() / f"{self._ident.replace(':', '_')}.rom")
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Save the card's video BIOS as", default,
-            "ROM images (*.rom);;All files (*)",
-        )
-        if not path or self.dump_requested is None:
-            return
-        self.rom_status.setText("reading the card's ROM…")
-        self.dump_requested(path)
 
 
 class TuningDialog(SizedDialog):
@@ -1429,6 +1093,48 @@ class TuningDialog(SizedDialog):
         )
         self.pin_enabled.toggled.connect(lambda _on: self._refresh_topology_note())
         self._refresh_topology_note()
+
+        # -- how much host CPU it may take
+        box.addWidget(_field_label("cpu limits"))
+        limits_note = QLabel(
+            "Pinning decides <i>which</i> cores this machine runs on; these "
+            "decide how much it may take when something else wants the same "
+            "ones. Weight only matters while the host is contended - a "
+            "machine at 2048 gets twice the CPU of one at the default 1024, "
+            "and nothing is given up while the host is idle. A ceiling is "
+            "enforced either way, so it slows the guest down even on an idle "
+            "host; leave it off unless something must be held back."
+        )
+        limits_note.setWordWrap(True)
+        limits_note.setTextFormat(Qt.TextFormat.RichText)
+        limits_note.setProperty("class", "Dim")
+        box.addWidget(limits_note)
+        limits_row = QHBoxLayout()
+        limits_row.setSpacing(10)
+        self.cpu_shares_on = QCheckBox("Weight")
+        self.cpu_shares_on.setChecked(bool(tuning.cpu_shares))
+        limits_row.addWidget(self.cpu_shares_on)
+        self.cpu_shares = QSpinBox()
+        self.cpu_shares.setRange(2, 262144)
+        self.cpu_shares.setSingleStep(256)
+        self.cpu_shares.setValue(tuning.cpu_shares or 1024)
+        self.cpu_shares.setToolTip("1024 is what everything else starts with")
+        limits_row.addWidget(self.cpu_shares)
+        limits_row.addSpacing(12)
+        self.cpu_cap_on = QCheckBox("Ceiling, % of one vCPU")
+        self.cpu_cap_on.setChecked(bool(tuning.cpu_cap_pct))
+        limits_row.addWidget(self.cpu_cap_on)
+        self.cpu_cap = QSpinBox()
+        self.cpu_cap.setRange(1, 100)
+        self.cpu_cap.setSuffix("%")
+        self.cpu_cap.setValue(tuning.cpu_cap_pct or 50)
+        limits_row.addWidget(self.cpu_cap)
+        limits_row.addStretch(1)
+        box.addLayout(limits_row)
+        self.cpu_shares_on.toggled.connect(self.cpu_shares.setEnabled)
+        self.cpu_cap_on.toggled.connect(self.cpu_cap.setEnabled)
+        self.cpu_shares.setEnabled(self.cpu_shares_on.isChecked())
+        self.cpu_cap.setEnabled(self.cpu_cap_on.isChecked())
 
         # -- hugepages
         box.addWidget(_field_label("memory backing"))

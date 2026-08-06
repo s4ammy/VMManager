@@ -23,6 +23,7 @@ from .storage import *  # noqa: F401,F403
 from .features import *  # noqa: F401,F403
 from .modes import *  # noqa: F401,F403
 from .tuning import *  # noqa: F401,F403
+from .startcheck import *  # noqa: F401,F403
 from .console import *  # noqa: F401,F403
 from .hostdev import *  # noqa: F401,F403
 from .elevate import *  # noqa: F401,F403

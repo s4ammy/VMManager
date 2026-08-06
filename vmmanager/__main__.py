@@ -32,6 +32,26 @@ def _startup_theme() -> str:
     return theme.QSS
 
 
+def _honour_xwayland_preference() -> None:
+    """Start under XWayland when the console keyboard grab has been asked for.
+
+    Has to happen before QApplication exists: the platform plugin is chosen
+    once, at construction, and cannot be changed afterwards. An explicit
+    QT_QPA_PLATFORM in the environment wins - someone who set it meant it.
+    """
+    import os
+
+    if os.environ.get("QT_QPA_PLATFORM"):
+        return
+    if os.environ.get("XDG_SESSION_TYPE") != "wayland":
+        return
+    from .pages.settings import console_force_xwayland
+
+    if console_force_xwayland():
+        os.environ["QT_QPA_PLATFORM"] = "xcb"
+        logs.log.info("starting under XWayland for the console keyboard grab")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="vmmanager")
     parser.add_argument(
@@ -58,6 +78,8 @@ def main() -> None:
 
         run_daemon()
         return
+
+    _honour_xwayland_preference()
 
     app = QApplication(sys.argv)
     # The name shown to people. setDesktopFileName has to keep matching

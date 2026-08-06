@@ -3,14 +3,9 @@
 from __future__ import annotations
 
 from PySide6.QtCore import (
-    Property,
-    QEasingCurve,
-    QPointF,
-    QPropertyAnimation,
     Qt,
     Signal,
 )
-from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (
     QFrame,
     QGridLayout,
@@ -19,11 +14,10 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSizePolicy,
     QVBoxLayout,
-    QWidget,
 )
 
 from .. import theme
-from ..libvirt_service import DomainSnapshot, HostSnapshot
+from ..libvirt_service import HostSnapshot
 from .format import fmt_mem
 from .indicators import UsageBar
 

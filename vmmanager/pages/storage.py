@@ -20,13 +20,11 @@ from .. import theme
 from ..dialogs import (
     ConfirmDialog,
     ErrorDialog,
-    NewPoolDialog,
     ResizeVolumeDialog,
     VolumeDialog,
 )
 from ..libvirt_service import (
     PoolInfo,
-    svc_create_pool,
     svc_create_volume,
     svc_delete_pool,
     svc_delete_volume,
@@ -366,6 +364,8 @@ class StoragePage(QWidget):
             self.subtitle.setText(f"compacting {len(chosen)} image(s)…")
 
             def work():
+                from ..libvirt_service import svc_compact_volume
+
                 messages = []
                 for c in chosen:
                     messages.append(svc_compact_volume(c.pool, c.name))

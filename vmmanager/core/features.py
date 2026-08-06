@@ -19,7 +19,6 @@ import libvirt
 
 from .connection import _with_conn
 from .devices import _APPLIED_CONFIG
-from .xmlesc import x
 
 EVDEV_DIR = Path("/dev/input/by-id")
 

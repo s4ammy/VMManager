@@ -59,9 +59,17 @@ F11 for fullscreen.
 
 Clicking the display hands the **whole keyboard to the guest** - Alt+Tab, Super
 and this app's own shortcuts included - until you press the release combination
-(Ctrl+Alt by default, Settings changes it). Under Wayland the compositor keeps a
-few keys whatever a client asks for, and the hint line says so rather than
-pretending otherwise.
+(Ctrl+Alt by default, Settings changes it). On X11 that is every key without
+exception.
+
+On Wayland it is every key except Super and Alt+Tab, and the reason is Qt
+rather than your compositor: the protocol for taking those exists and KWin,
+Mutter and Sway all offer it, but Qt's Wayland plugin does not implement the
+request, so the console never gets to ask. The hint line under the display
+says which of the two you have. If you want the missing keys, Settings has
+**"Capture Super and Alt+Tab as well"**, which starts the app under XWayland,
+where the grab is granted - at the cost of native Wayland output for the rest
+of the app, which is why it is not the default.
 
 **Display setup** tells you why a console is slower than it should be. A
 VGA-class display device has no accelerated driver to install, so the guest
@@ -70,6 +78,10 @@ resolution - which is the usual answer to "I installed the virtio drivers and
 nothing improved". The check names it, and fixes it: the right display device
 for the connection, the SPICE agent channel, a tablet. The guest's resolution
 can then follow the window, on VNC as well as SPICE.
+
+**Send a USB device to the guest** from the console's ⋯ menu, for as long as
+it is plugged in. Different from assigning it as hardware: it travels over the
+SPICE connection, the host keeps it, and unplugging gives it straight back.
 
 **Drop a file on the console** and it lands inside the guest through the
 agent - /tmp on Unix guests, C:\Users\Public on Windows. Several files
@@ -112,6 +124,10 @@ you turn that off in Settings, and nothing on disk is deleted.
 
 - Disks and network cards, added and removed live, falling back to the next
   restart when live is not possible.
+- **Grow a disk** from its faceplate, and a running machine is told about it
+  straight away - with the honest note that the guest still has to extend the
+  partition and the filesystem inside. Growing only: shrinking throws away
+  whatever was past the new end and the filesystem finds out later.
 - CD/DVD media changed or ejected.
 - The **virtio-win driver disc** attached in one step, from a copy already on
   the host, from a storage pool, or downloaded. Windows cannot see a virtio disk
@@ -121,9 +137,46 @@ you turn that off in Settings, and nothing on disk is deleted.
 - vCPU count and memory, including live memory ballooning.
 - CPU model and topology, video model, sound, per-disk cache mode, input
   devices, boot order, machine type, boot menu, MAC addresses and link state.
+- **Fields you can just type in.** A device's properties are on its faceplate
+  as the controls themselves, not behind an Edit button: change one and a
+  Save and Discard pair appears, and only what you actually changed is
+  written. Discard puts back what the machine says. The processor's model,
+  topology and chipset; memory; the boot order; name and notes; a disk's
+  cache mode; a network card's MAC, model, link and filter; the video
+  adapter; the watchdog action; a controller's model; a passed-through
+  card's ROM - all of them edit in place. The Save pair sits below the
+  panel rather than in it, so a change made at the top of a long faceplate
+  does not put the button that saves it out of sight. What each field means
+  is a **?** beside it rather than a paragraph under it - the explanation is
+  there when you want it and out of the way when you do not.
+- **Disks** carry a serial (what the guest reads as the drive's serial number,
+  and so how udev names it under `/dev/disk/by-id`), a discard mode (`unmap`
+  passes the guest's TRIM through to the host image, which is what stops a
+  thin image only ever growing), and read-only and shareable flags.
+- **Displays** are editable in full: SPICE or VNC, what it listens on -
+  address, socket, or nothing at all, which is what a machine with its GPU
+  handed over wants - the address itself, an explicit port or libvirt's
+  choice, a password you can reveal, and OpenGL.
+- **Boot devices are ticked on and off** and moved with arrows on the
+  faceplate. The last one cannot be unticked: libvirt accepts a machine that
+  boots from nothing, and it looks like a broken disk rather than a setting.
+- **Shared memory** as a checkbox on the memory faceplate, which is what
+  virtiofs and Looking Glass both need.
+- **A network card's link** can be pulled and put back - the software
+  equivalent of unplugging the cable, with the card left on the machine.
+- **A passed-through card's video BIOS** is a field on the device, with the
+  dump beside it: it reads the ROM from the card, trims it to the legacy
+  image a guest looks for, and warns if the result names a different card.
+- The **overview** names the machine itself: its UUID, hypervisor,
+  architecture and emulator binary, which were previously only in the XML.
 - USB and PCI devices handed to the guest, and folders shared with virtiofs or
   9p.
 - Watchdog, USB redirection, vsock, panic notifier, smartcard, hot-plug memory.
+
+**Tuning** and **Guest features** stay as dialogs rather than faceplate fields.
+Each is a dozen or more controls that only make sense against each other - a
+pinning matrix, a table of CPU flags - and spreading them down a faceplate
+would make them harder to read, not easier.
 
 **Tuning** covers what makes a passthrough guest feel right:
 
@@ -135,6 +188,10 @@ you turn that off in Settings, and nothing on disk is deleted.
 - The guest is told which of its own CPUs share a core, because without that its
   scheduler puts two busy threads on one core.
 - Hugepage backing, iothreads, and per-disk throughput and IOPS limits.
+- **CPU weight and ceiling**: a weight only matters when the host is
+  contended - a machine at 2048 gets twice the CPU of one at the default 1024
+  and gives up nothing while the host is idle - while a ceiling is enforced
+  either way. They survive a repin, which they share an XML element with.
 
 **Guest features** are the settings people usually paste into raw XML:
 
@@ -149,6 +206,13 @@ you turn that off in Settings, and nothing on disk is deleted.
 
 Where libvirt insists on a dependency, it is handled for you - turning on
 `stimer` brings the `hypervclock` timer with it.
+
+**Why won't it start?** libvirt's answer to a failed start is accurate and
+rarely useful. This looks at the host instead and says what the definition can
+no longer count on: a disk or ISO that moved, a UEFI variables file that went
+with it, hugepages nobody reserved, pinning that names CPUs this host does not
+have, a card the host driver took back. It runs itself after a failed start
+and sits in the machine's menu for looking before trying.
 
 **PCI passthrough diagnostics** show IOMMU groups, which driver each device is
 bound to, and a plain verdict on whether passthrough will work and why not.
@@ -253,6 +317,14 @@ hardcoded.
 
 **New machine** installs from an ISO, from a network install tree by URL,
 imports a disk image you already have, or starts empty.
+
+**Unattended Windows installs**, the counterpart to cloud-init. Tick it in
+the wizard, give a user, a password and the edition, and Setup is answered in
+advance: partitioning, locale, the account, and Windows 11's demand for a
+Microsoft account. It also points Setup at the virtio storage driver, which is
+what otherwise leaves you at "where do you want to install Windows?" with an
+empty disk list - the driver folder is offered under every letter the disc
+might get, since Setup ignores the ones that are not there.
 
 - Sensible defaults per operating system from libosinfo (952 variants), detected
   from the ISO you picked.

@@ -20,6 +20,7 @@ def _hostdev_ident(h: ET.Element) -> HostdevInfo | None:
         return HostdevInfo(
             kind="usb",
             ident=f"{int(vendor.get('id', '0'), 16):04x}:{int(product.get('id', '0'), 16):04x}",
+            startup_policy=src.get("startupPolicy", "mandatory"),
         )
     if kind == "pci":
         a = src.find("address")
@@ -78,11 +79,28 @@ def _next_disk_target(root: ET.Element, bus: str) -> str:
             return prefix + suffix
         i += 1
 
+# Rows that are a property of the machine rather than a device in it, and
+# the top-level elements each one is made of. Without an entry here the XML
+# view goes looking for a <labels> device and tells you it is missing.
 _SYSTEM_ITEM_TAGS = {
     "cpu": ("vcpu", "cpu"),
     "mem": ("memory", "currentMemory", "memoryBacking"),
     "boot": ("os",),
+    "labels": ("title", "description"),
+    "tune": ("cputune", "memtune", "memoryBacking", "iothreads"),
+    "features": ("features", "cpu"),
+    "ports": ("devices/controller[@model='pcie-root-port']",),
 }
+
+# Devices a machine has at most one of, so the row carries no identity and
+# the tag alone finds it. Without these the XML view of a watchdog - or a
+# vsock, or the audio backend - reports the device as missing.
+_SIMPLE_DEVICE_TAGS = {
+    "watchdog": "watchdog", "vsock": "vsock", "redir": "redirdev",
+    "panic": "panic", "smartcard": "smartcard", "audio": "audio",
+    "dimm": "memory",
+}
+
 
 def _find_device_element(root: ET.Element, kind: str, ident: str) -> ET.Element | None:
     devices = root.find("devices")
@@ -113,11 +131,18 @@ def _find_device_element(root: ET.Element, kind: str, ident: str) -> ET.Element 
         for i in devices.findall("input"):
             if i.get("type") == itype and i.get("bus") == bus:
                 return i
-    elif kind in ("usb", "pci"):
+    elif kind in ("usb", "pci", "mdev"):
         for h in devices.findall("hostdev"):
             info = _hostdev_ident(h)
             if info is not None and info.kind == kind and info.ident == ident:
                 return h
+    elif kind == "controller":
+        ctype, _, index = ident.partition("/")
+        for c in devices.findall("controller"):
+            if c.get("type") == ctype and c.get("index", "0") == index:
+                return c
+    elif kind in _SIMPLE_DEVICE_TAGS:
+        return devices.find(_SIMPLE_DEVICE_TAGS[kind])
     elif kind == "fs":
         for f in devices.findall("filesystem"):
             t = f.find("target")

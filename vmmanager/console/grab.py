@@ -15,9 +15,17 @@ Grabbing is three things, because a key can be taken at three levels:
 - Other widgets. `grabKeyboard()` routes every key in this application to the
   display, wherever the focus happens to be.
 - The desktop. `setKeyboardGrabEnabled()` asks the windowing system for the
-  rest: an X11 keyboard grab, or Wayland's shortcut-inhibit protocol. A
-  compositor is free to refuse - and some do - which is why the other two are
-  not skipped when it works.
+  rest: Super, Alt+Tab, and whatever else the compositor keeps for itself.
+  It can be refused, which is why the other two are not skipped when it works.
+
+  It is refused on every Wayland session, and not because the compositor said
+  no: Qt's Wayland plugin does not implement the request at all, so it returns
+  false without asking. The protocol exists - KWin, Mutter and Sway all offer
+  zwp_keyboard_shortcuts_inhibit_manager_v1, which is how virt-manager gets
+  the whole keyboard there - but reaching it needs the window's wl_surface,
+  and Qt exposes that only to C++. Under X11, and under XWayland, the grab is
+  granted and every key arrives. So `hint()` says which of the two is
+  happening rather than describing the good case and hoping.
 
 Held until the release combination (Ctrl+Alt by default, Settings changes it),
 which is the one thing the guest never receives.
@@ -100,6 +108,14 @@ class InputGrab(QObject):
         """
         if self._system:
             return f"every key goes to the guest · {release_combo_name()} to release"
+        if QApplication.instance() is not None and \
+                QApplication.instance().platformName().startswith("wayland"):
+            return (
+                "keys go to the guest, except the ones Wayland keeps for the "
+                "desktop - Super and Alt+Tab switch your windows, not the "
+                f"guest's · {release_combo_name()} to release · start "
+                "vmmanager with QT_QPA_PLATFORM=xcb to capture those too"
+            )
         return (
             "keys go to the guest, except the ones your desktop keeps for "
             f"itself · {release_combo_name()} to release"

@@ -10,7 +10,6 @@ so.
 
 from __future__ import annotations
 
-import pytest
 
 from vmmanager.core.models import DisplayHealth
 

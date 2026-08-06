@@ -954,6 +954,24 @@ QDialog {{
     font-size: 11px;
 }}
 
+/* The "?" beside a faceplate field. The explanation lives in its tooltip:
+   spelling every one of them out in prose made a device's properties
+   scroll off the panel, which is the opposite of the point. */
+#FieldHint {{
+    color: {TEXT_FAINT};
+    background: {BG_INSET};
+    border: 1px solid {BORDER};
+    border-radius: {RADIUS_SM}px;
+    font-family: "{MONO}";
+    font-size: 11px;
+    font-weight: 600;
+}}
+
+#FieldHint:hover {{
+    color: {ACCENT};
+    border-color: {ACCENT};
+}}
+
 /* ---------- scrollbars ---------- */
 
 QScrollArea {{

@@ -96,8 +96,6 @@ def test_dialog_fits_at_its_minimum_size(qapp, name):
         None, "Switch win11 to 'prod'", LONG_BODY, "Switch")),
     ("ErrorDialog", lambda: dialogs.ErrorDialog(
         None, "Could not start web-01", LONG_BODY)),
-    ("LabelsDialog", lambda: dialogs.LabelsDialog(
-        None, "a machine with a rather long descriptive title", LONG_BODY)),
 ])
 def test_dialog_fits_with_prose_in_it(qapp, name, make):
     """The same dialogs again, with text long enough to wrap."""

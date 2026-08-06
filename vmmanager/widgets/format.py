@@ -2,28 +2,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import (
-    Property,
-    QEasingCurve,
-    QPointF,
-    QPropertyAnimation,
-    Qt,
-    Signal,
-)
-from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen
-from PySide6.QtWidgets import (
-    QFrame,
-    QGridLayout,
-    QHBoxLayout,
-    QLabel,
-    QPushButton,
-    QSizePolicy,
-    QVBoxLayout,
-    QWidget,
-)
 
-from .. import theme
-from ..libvirt_service import DomainSnapshot, HostSnapshot
 
 
 def fmt_bytes(bps: float) -> str:

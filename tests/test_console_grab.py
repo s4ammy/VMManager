@@ -219,3 +219,73 @@ def test_the_combination_releases_both(spice):
     press(spice, Qt.Key.Key_Alt)
     assert not spice.captured
     assert not spice.grab.held
+
+
+# ----------------------------------------------------- what the desktop allows
+
+def test_the_hint_says_which_keys_wayland_is_keeping(qapp, monkeypatch):
+    """Not "except the ones your desktop keeps": which ones, and the fix.
+
+    Qt's Wayland plugin never asks for shortcut inhibition, so the grab is
+    always partial there and saying so vaguely leaves people thinking the
+    console is broken.
+    """
+    from PySide6.QtWidgets import QLabel
+
+    from vmmanager.console.grab import InputGrab
+
+    monkeypatch.setattr(type(qapp), "platformName", lambda _self: "wayland")
+    grab = InputGrab(QLabel())
+    grab._system = False
+    hint = grab.hint()
+    assert "Super and Alt+Tab" in hint
+    assert "QT_QPA_PLATFORM=xcb" in hint, "say what actually fixes it"
+
+
+def test_a_granted_grab_does_not_apologise(qapp, monkeypatch):
+    from PySide6.QtWidgets import QLabel
+
+    from vmmanager.console.grab import InputGrab
+
+    monkeypatch.setattr(type(qapp), "platformName", lambda _self: "wayland")
+    grab = InputGrab(QLabel())
+    grab._system = True
+    assert grab.hint().startswith("every key goes to the guest")
+
+
+def test_xwayland_is_only_forced_when_it_was_asked_for(monkeypatch, scratch_settings):
+    """The platform is chosen once, before QApplication, so this runs early
+    and has to be sure about it."""
+    from vmmanager.__main__ import _honour_xwayland_preference
+    from vmmanager.pages.settings import save_console_force_xwayland
+
+    env = {"XDG_SESSION_TYPE": "wayland"}
+    monkeypatch.setattr("os.environ", env)
+    _honour_xwayland_preference()
+    assert "QT_QPA_PLATFORM" not in env, "off by default"
+
+    save_console_force_xwayland(True)
+    _honour_xwayland_preference()
+    assert env["QT_QPA_PLATFORM"] == "xcb"
+
+
+def test_an_explicit_platform_in_the_environment_wins(monkeypatch, scratch_settings):
+    from vmmanager.__main__ import _honour_xwayland_preference
+    from vmmanager.pages.settings import save_console_force_xwayland
+
+    save_console_force_xwayland(True)
+    env = {"XDG_SESSION_TYPE": "wayland", "QT_QPA_PLATFORM": "offscreen"}
+    monkeypatch.setattr("os.environ", env)
+    _honour_xwayland_preference()
+    assert env["QT_QPA_PLATFORM"] == "offscreen", "someone who set it meant it"
+
+
+def test_an_x11_session_is_left_alone(monkeypatch, scratch_settings):
+    from vmmanager.__main__ import _honour_xwayland_preference
+    from vmmanager.pages.settings import save_console_force_xwayland
+
+    save_console_force_xwayland(True)
+    env = {"XDG_SESSION_TYPE": "x11"}
+    monkeypatch.setattr("os.environ", env)
+    _honour_xwayland_preference()
+    assert "QT_QPA_PLATFORM" not in env, "the X11 grab already works"

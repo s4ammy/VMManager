@@ -8,16 +8,20 @@ import xml.etree.ElementTree as ET
 import libvirt
 
 from .connection import _with_conn, current_uri
-from .models import DiskInfo, FsShareInfo, Hardware, NicInfo
+from .models import DiskInfo, FsShareInfo, GraphicsDetail, Hardware, NicInfo
 from .xmlesc import x
 from .xmlutil import _SYSTEM_ITEM_TAGS, _boot_entries, _find_device_element, _hostdev_ident, _next_disk_target, _pretty_xml
 
 def svc_get_hardware(uuid: str) -> Hardware:
     def go(conn):
         dom = conn.lookupByUUIDString(uuid)
-        # persistent config, not the live view: this is what edits change,
-        # so pending (next-boot) devices show up right away
-        root = ET.fromstring(dom.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE))
+        # Persistent config, not the live view: this is what edits change,
+        # so pending (next-boot) devices show up right away. SECURE as well,
+        # or libvirt redacts a display's password and the field that shows
+        # it would always read empty and quietly clear it on save.
+        root = ET.fromstring(dom.XMLDesc(
+            libvirt.VIR_DOMAIN_XML_INACTIVE | libvirt.VIR_DOMAIN_XML_SECURE
+        ))
         os_el = root.find("os")
         machine = os_el.find("type").get("machine", "?") if os_el is not None else "?"
         firmware = "UEFI" if (
@@ -45,6 +49,10 @@ def svc_get_hardware(uuid: str) -> Hardware:
                     format=driver.get("type", "raw") if driver is not None else "raw",
                     device=d.get("device", "disk"),
                     cache=driver.get("cache", "default") if driver is not None else "default",
+                    readonly=d.find("readonly") is not None,
+                    shareable=d.find("shareable") is not None,
+                    serial=d.findtext("serial") or "",
+                    discard=driver.get("discard", "") if driver is not None else "",
                 )
             )
         nics = []
@@ -61,12 +69,14 @@ def svc_get_hardware(uuid: str) -> Hardware:
                     or ""
                 )
             fref = n.find("filterref")
+            link = n.find("link")
             nics.append(
                 NicInfo(
                     mac=mac.get("address", "?") if mac is not None else "?",
                     source=src,
                     model=model.get("type", "?") if model is not None else "?",
                     filter=fref.get("filter", "") if fref is not None else "",
+                    link_up=link is None or link.get("state", "up") != "down",
                 )
             )
         hostdevs = []
@@ -89,7 +99,29 @@ def svc_get_hardware(uuid: str) -> Hardware:
             )
         graphics = []
         for g in root.findall("devices/graphics"):
-            graphics.append((g.get("type", "?"), display_ident(g)))
+            listen = g.find("listen")
+            gl = g.find("gl")
+            port_text = g.get("port") or "-1"
+            graphics.append(GraphicsDetail(
+                type=g.get("type", "?"),
+                ident=display_ident(g),
+                listen_type=(
+                    listen.get("type", "address") if listen is not None
+                    else ("socket" if g.get("socket") else "address")
+                ),
+                address=(
+                    (listen.get("address") if listen is not None else None)
+                    or g.get("listen") or ""
+                ),
+                port=int(port_text) if port_text.lstrip("-").isdigit() else -1,
+                autoport=g.get("autoport", "yes") != "no",
+                password=g.get("passwd") or "",
+                gl=gl is not None and gl.get("enable") == "yes",
+                socket=(
+                    (listen.get("socket") if listen is not None else None)
+                    or g.get("socket") or ""
+                ),
+            ))
         video_el = root.find("devices/video/model")
         video = video_el.get("type", "?") if video_el is not None else "none"
         mem_kb = int(mem_el.text or 0) if mem_el is not None else 0
@@ -132,7 +164,17 @@ def svc_get_hardware(uuid: str) -> Hardware:
             for c in root.findall("devices/controller")
             if c.get("model")
         )
+        emulator = root.findtext("devices/emulator") or ""
+        access = root.find("memoryBacking/access")
         return Hardware(
+            uuid=root.findtext("uuid") or "",
+            hypervisor=root.get("type", "?"),
+            arch=(
+                os_el.find("type").get("arch", "?")
+                if os_el is not None and os_el.find("type") is not None else "?"
+            ),
+            emulator=emulator,
+            shared_memory=access is not None and access.get("mode") == "shared",
             machine=machine,
             firmware=firmware,
             cpu_mode=cpu_mode,
@@ -351,8 +393,15 @@ def svc_set_boot_order(uuid: str, entries: list[str]) -> str:
     """Reorder boot entries as returned by Hardware.boot.
 
     Per-device entries look like "disk vda" / "nic 52:54:…"; plain entries
-    ("hd", "cdrom", "network") are os-level boot devs.
+    ("hd", "cdrom", "network") are os-level boot devs. An empty list is
+    refused: libvirt accepts it and the machine then boots from nothing,
+    which looks like a broken disk rather than a setting.
     """
+    if not entries:
+        raise ValueError(
+            "A machine has to be able to boot from something - leave at "
+            "least one device in the boot order."
+        )
 
     def go(conn):
         dom = conn.lookupByUUIDString(uuid)
@@ -406,7 +455,9 @@ def svc_get_device_xml(uuid: str, kind: str, ident: str) -> str:
                 for el in root.findall(tag)
             ]
             if not parts:
-                raise RuntimeError(f"No XML for '{kind}'")
+                # Nothing set is a normal state for a title, or for tuning
+                # nobody has touched. Saying so beats an error dialog.
+                return f"<!-- nothing set on this machine for '{kind}' -->"
             return "\n".join(parts)
         el = _find_device_element(root, kind, ident)
         if el is None:
@@ -625,6 +676,16 @@ WATCHDOG_ACTIONS = ("reset", "poweroff", "shutdown", "pause", "none", "dump")
 PANIC_MODELS = ("isa", "pvpanic", "hyperv", "s390")
 AUDIO_BACKENDS = ("spice", "pipewire", "pulseaudio", "alsa", "none")
 
+# What each controller type can be, for the faceplate to offer. A model
+# outside its list is kept rather than replaced: QEMU knows more of them
+# than this, and a machine that already works should not be quietly
+# rewritten just because its controller is not listed here.
+CONTROLLER_MODELS = {
+    "usb": ["qemu-xhci", "nec-xhci", "ich9-ehci1", "piix3-uhci", "none"],
+    "scsi": ["virtio-scsi", "lsilogic", "megasas"],
+    "pci": ["pcie-root-port", "pcie-to-pci-bridge", "pci-bridge"],
+}
+
 
 def _has_spice(root: ET.Element) -> bool:
     return any(g.get("type") == "spice" for g in root.findall("devices/graphics"))
@@ -821,6 +882,289 @@ def display_ident(g: ET.Element) -> str:
     drift into disagreeing about which display is which.
     """
     return g.get("port") or g.get("listen") or "auto"
+
+def svc_set_disk_options(uuid: str, dev: str, readonly: bool | None = None,
+                         shareable: bool | None = None,
+                         serial: str | None = None,
+                         discard: str | None = None) -> str:
+    """The disk properties that are flags on the element rather than values.
+
+    - readonly: the guest may not write to it at all.
+    - shareable: two machines may hold it at once. Nothing coordinates
+      their writes, so it is for a cluster filesystem or a disk both sides
+      only read - anything else corrupts it.
+    - serial: what the guest reads as the drive's serial number, which is
+      how udev's /dev/disk/by-id names it.
+    - discard='unmap': TRIM inside the guest frees the space in the host
+      image too, which is what stops a thin image only ever growing.
+    """
+    if discard not in (None, "", "unmap", "ignore"):
+        raise ValueError("discard is 'unmap', 'ignore', or unset")
+
+    def go(conn):
+        dom = conn.lookupByUUIDString(uuid)
+        root = ET.fromstring(dom.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE))
+        for d in root.findall("devices/disk"):
+            t = d.find("target")
+            if t is None or t.get("dev") != dev:
+                continue
+            if readonly is not None:
+                _flag_element(d, "readonly", readonly)
+            if shareable is not None:
+                _flag_element(d, "shareable", shareable)
+            if serial is not None:
+                existing = d.find("serial")
+                if existing is not None:
+                    d.remove(existing)
+                if serial.strip():
+                    ET.SubElement(d, "serial").text = serial.strip()
+            if discard is not None:
+                driver = d.find("driver")
+                if driver is None:
+                    driver = ET.SubElement(d, "driver", {"name": "qemu"})
+                if discard:
+                    driver.set("discard", discard)
+                elif "discard" in driver.attrib:
+                    del driver.attrib["discard"]
+            conn.defineXML(ET.tostring(root, encoding="unicode"))
+            return _APPLIED_CONFIG
+        raise RuntimeError(f"No disk '{dev}' on this machine")
+
+    return _with_conn(go)
+
+
+def _flag_element(parent: ET.Element, tag: str, on: bool) -> None:
+    """A child element whose presence is the setting, like <readonly/>."""
+    existing = parent.find(tag)
+    if on and existing is None:
+        ET.SubElement(parent, tag)
+    elif not on and existing is not None:
+        parent.remove(existing)
+
+
+def svc_set_graphics(uuid: str, gtype: str, ident: str, listen_type=None,
+                     address=None, port=None, autoport=None, password=None,
+                     gl=None) -> str:
+    """Edit one <graphics> device.
+
+    Graphics cannot hot-plug, so all of this lands on the next start. A
+    port only means anything with autoport off; asking for both is the
+    usual way to end up wondering why the port never changes, so setting
+    an explicit port turns autoport off here rather than silently losing.
+    """
+    if listen_type not in (None, "address", "socket", "none"):
+        raise ValueError("listen type is 'address', 'socket' or 'none'")
+
+    def go(conn):
+        dom = conn.lookupByUUIDString(uuid)
+        root = ET.fromstring(dom.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE))
+        same_type = [
+            g for g in root.findall("devices/graphics") if g.get("type") == gtype
+        ]
+        if not same_type:
+            raise RuntimeError(f"This machine has no {gtype} display")
+        exact = [g for g in same_type if display_ident(g) == str(ident)]
+        g = exact[0] if exact else (same_type[0] if len(same_type) == 1 else None)
+        if g is None:
+            raise RuntimeError(
+                f"More than one {gtype} display and none is '{ident}' - "
+                "refresh the hardware list and try again"
+            )
+        if port is not None:
+            if int(port) > 0:
+                g.set("port", str(int(port)))
+                g.set("autoport", "no")  # or the port is ignored
+            else:
+                g.attrib.pop("port", None)
+        if autoport is not None:
+            g.set("autoport", "yes" if autoport else "no")
+            if autoport:
+                g.attrib.pop("port", None)
+        if password is not None:
+            if password:
+                g.set("passwd", password)
+            else:
+                g.attrib.pop("passwd", None)
+        if listen_type is not None or address is not None:
+            for old in g.findall("listen"):
+                g.remove(old)
+            g.attrib.pop("listen", None)
+            g.attrib.pop("socket", None)
+            kind = listen_type or "address"
+            if kind == "address":
+                where = address if address is not None else "127.0.0.1"
+                ET.SubElement(g, "listen", {"type": "address", "address": where})
+                g.set("listen", where)
+            elif kind == "socket":
+                ET.SubElement(g, "listen", {"type": "socket"})
+            else:
+                ET.SubElement(g, "listen", {"type": "none"})
+        if gl is not None:
+            for old in g.findall("gl"):
+                g.remove(old)
+            if gl:
+                ET.SubElement(g, "gl", {"enable": "yes"})
+        conn.defineXML(ET.tostring(root, encoding="unicode"))
+        return _APPLIED_CONFIG
+
+    return _with_conn(go)
+
+
+def svc_set_display_type(uuid: str, old: str, new: str) -> str:
+    """Turn a SPICE display into a VNC one, or the other way round.
+
+    This is not a rename: the two protocols do not carry the same
+    attributes, so the ones that only mean something to the type being
+    left behind are dropped rather than kept as dead weight. What is
+    common to both - where it listens, its port, its password - stays.
+    """
+    if new not in ("spice", "vnc"):
+        raise ValueError("A display is 'spice' or 'vnc'")
+
+    # Attributes and children that belong to one protocol only.
+    only = {
+        "spice": (("defaultMode", "compression", "streaming"),
+                  ("image", "jpeg", "zlib", "playback", "streaming",
+                   "clipboard", "mouse", "filetransfer")),
+        "vnc": (("sharePolicy", "powerControl", "websocket"), ()),
+    }
+
+    def go(conn):
+        dom = conn.lookupByUUIDString(uuid)
+        root = ET.fromstring(dom.XMLDesc(
+            libvirt.VIR_DOMAIN_XML_INACTIVE | libvirt.VIR_DOMAIN_XML_SECURE
+        ))
+        same = [g for g in root.findall("devices/graphics")
+                if g.get("type") == old]
+        if not same:
+            raise RuntimeError(f"This machine has no {old} display")
+        if any(g.get("type") == new for g in root.findall("devices/graphics")):
+            raise RuntimeError(
+                f"This machine already has a {new} display. Remove that one "
+                "first - two displays of the same type fight over the port."
+            )
+        g = same[0]
+        attrs, children = only.get(old, ((), ()))
+        for name in attrs:
+            g.attrib.pop(name, None)
+        for tag in children:
+            for el in g.findall(tag):
+                g.remove(el)
+        if new == "vnc":
+            # OpenGL is a SPICE-only path to the local host's GPU.
+            for el in g.findall("gl"):
+                g.remove(el)
+        g.set("type", new)
+        conn.defineXML(ET.tostring(root, encoding="unicode"))
+        return _APPLIED_CONFIG
+
+    return _with_conn(go)
+
+
+def svc_set_shared_memory(uuid: str, on: bool) -> str:
+    """<memoryBacking><access mode='shared'/>.
+
+    What virtiofs and Looking Glass both need: the guest's memory has to
+    be mappable by another process on the host. Off by default because it
+    stops the memory being backed by anything private.
+    """
+
+    def go(conn):
+        dom = conn.lookupByUUIDString(uuid)
+        root = ET.fromstring(dom.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE))
+        backing = root.find("memoryBacking")
+        if on:
+            if backing is None:
+                backing = ET.SubElement(root, "memoryBacking")
+            access = backing.find("access")
+            if access is None:
+                access = ET.SubElement(backing, "access")
+            access.set("mode", "shared")
+        elif backing is not None:
+            for access in backing.findall("access"):
+                backing.remove(access)
+            if len(backing) == 0:
+                root.remove(backing)
+        conn.defineXML(ET.tostring(root, encoding="unicode"))
+        return _APPLIED_CONFIG
+
+    return _with_conn(go)
+
+
+def svc_grow_disk(uuid: str, dev: str, new_gb: float) -> str:
+    """Make one of a machine's disks bigger.
+
+    Growing only. Shrinking a disk from here is not offered: qcow2 will not
+    do it, and on a raw image it silently throws away whatever was past the
+    new end - by the time the guest notices, the filesystem is already
+    short. The Storage page still resizes a volume directly for anyone who
+    means it.
+
+    The volume is grown, and a running machine is told about it through
+    blockResize so it sees the new size without a restart. What the guest
+    does with the space is its own business - the partition and the
+    filesystem on it still have to be extended inside.
+    """
+
+    def go(conn):
+        dom = conn.lookupByUUIDString(uuid)
+        root = ET.fromstring(
+            dom.XMLDesc(0 if dom.isActive() else libvirt.VIR_DOMAIN_XML_INACTIVE)
+        )
+        disk = next(
+            (
+                d for d in root.findall("devices/disk")
+                if (t := d.find("target")) is not None and t.get("dev") == dev
+            ),
+            None,
+        )
+        if disk is None:
+            raise RuntimeError(f"No disk '{dev}' on this machine")
+        src = disk.find("source")
+        if src is None or not src.get("file"):
+            raise RuntimeError(
+                f"'{dev}' is not a file-backed disk, so there is no volume "
+                "to grow"
+            )
+        path = src.get("file")
+        try:
+            vol = conn.storageVolLookupByPath(path)
+        except libvirt.libvirtError:
+            raise RuntimeError(
+                f"{path} is not in a storage pool this connection knows "
+                "about, so its size cannot be changed from here"
+            ) from None
+        _t, capacity, _alloc = vol.info()
+        new_bytes = int(new_gb * 1024**3)
+        if new_bytes <= capacity:
+            raise RuntimeError(
+                f"'{dev}' is already {capacity / 1024**3:.1f} GB. This only "
+                "grows a disk - shrinking one loses whatever was past the "
+                "new end."
+            )
+        vol.resize(new_bytes, 0)
+        if dom.isActive():
+            try:
+                # bytes, explicitly: the default unit here is KiB, and a
+                # size passed in the wrong one is a disk 1024 times the
+                # wrong size rather than an error
+                dom.blockResize(
+                    dev, new_bytes, libvirt.VIR_DOMAIN_BLOCK_RESIZE_BYTES
+                )
+                return (
+                    f"{dev} grown to {new_gb:.1f} GB and the running machine "
+                    "told about it - the guest still has to extend the "
+                    "partition and filesystem on it."
+                )
+            except libvirt.libvirtError:
+                pass
+        return (
+            f"{dev} grown to {new_gb:.1f} GB. The guest sees it after a "
+            "restart, and still has to extend the partition and filesystem."
+        )
+
+    return _with_conn(go)
+
 
 def svc_remove_display(uuid: str, gtype: str, ident: str) -> str:
     """Remove one <graphics> element, named rather than guessed at.

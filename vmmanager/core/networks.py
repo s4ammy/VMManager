@@ -195,6 +195,16 @@ class NetworkSpec:
     # (name, is_default, inbound_kbps, outbound_kbps)
 
 
+def default_attr(is_default: bool) -> str:
+    """The default='yes' attribute, or nothing.
+
+    Not inline in the f-string: escaping the quotes there needs backslashes,
+    which f-strings only allow from Python 3.12, and this package supports
+    3.11 - where the module would not even parse.
+    """
+    return " default='yes'" if is_default else ""
+
+
 def _ip_block(subnet: str, dhcp_start: str, dhcp_end: str, leases, family: str,
               dhcp_v6: bool = False) -> str:
     import ipaddress
@@ -258,7 +268,7 @@ def _network_xml_ex(spec: NetworkSpec) -> str:
     )
     v6 = _ip_block(spec.ipv6_subnet, "", "", (), "ipv6", spec.ipv6_dhcp)
     groups = "".join(
-        f"<portgroup name='{x(name)}'{' default=\'yes\'' if is_default else ''}>"
+        f"<portgroup name='{x(name)}'{default_attr(is_default)}>"
         + (
             "<bandwidth>"
             + (f"<inbound average='{x(inb)}'/>" if inb else "")

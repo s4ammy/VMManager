@@ -84,10 +84,24 @@ class Tuning:
     hugepage_size_kb: int = 0  # 0 means not backed by hugepages
     iothreads: int = 0
     throttles: dict[str, DiskThrottle] = field(default_factory=dict)
+    # <cputune>: how much host CPU this machine may take when there is
+    # competition for it. shares is a relative weight (1024 is the default
+    # every process starts with); quota/period are a hard ceiling per vCPU,
+    # in microseconds.
+    cpu_shares: int = 0   # 0 means not set
+    cpu_quota: int = 0    # 0 means not set, -1 means explicitly unlimited
+    cpu_period: int = 0
 
     @property
     def pinned(self) -> bool:
         return bool(self.vcpu_pins)
+
+    @property
+    def cpu_cap_pct(self) -> int:
+        """The quota as a percentage of one vCPU, or 0 when uncapped."""
+        if self.cpu_quota > 0 and self.cpu_period > 0:
+            return round(self.cpu_quota * 100 / self.cpu_period)
+        return 0
 
 
 def _parse_cpuset(text: str) -> tuple[int, ...]:
@@ -339,6 +353,13 @@ def svc_get_tuning(uuid: str) -> Tuning:
                     size_kb = 0
             else:
                 size_kb = -1  # hugepages on, size left to the host
+        def cputune_int(tag: str) -> int:
+            text = root.findtext(f"cputune/{tag}")
+            try:
+                return int(text) if text else 0
+            except ValueError:
+                return 0
+
         iothreads = root.findtext("iothreads")
         throttles = {}
         for disk in root.findall("devices/disk"):
@@ -363,6 +384,9 @@ def svc_get_tuning(uuid: str) -> Tuning:
             hugepage_size_kb=size_kb,
             iothreads=int(iothreads) if iothreads and iothreads.isdigit() else 0,
             throttles=throttles,
+            cpu_shares=cputune_int("shares"),
+            cpu_quota=cputune_int("quota"),
+            cpu_period=cputune_int("period"),
         )
 
     return _with_conn(go)
@@ -386,10 +410,20 @@ def svc_set_cpu_pinning(uuid: str, pins: dict[int, tuple[int, ...]],
         dom = conn.lookupByUUIDString(uuid)
         root = ET.fromstring(dom.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE))
         existing = root.find("cputune")
+        # shares and quota live in the same element and are nothing to do
+        # with pinning; rebuilding it from scratch would silently drop them.
+        kept = []
         if existing is not None:
+            kept = [
+                child for child in existing
+                if child.tag in ("shares", "quota", "period",
+                                 "global_quota", "global_period")
+            ]
             root.remove(existing)
-        if pins or emulator:
+        if pins or emulator or kept:
             cputune = ET.SubElement(root, "cputune")
+            for child in kept:
+                cputune.append(child)
             for vcpu in sorted(pins):
                 if not pins[vcpu]:
                     continue
@@ -416,6 +450,72 @@ def svc_set_cpu_pinning(uuid: str, pins: dict[int, tuple[int, ...]],
                     break
             if applied == len(pins):
                 return _APPLIED_LIVE
+        return _APPLIED_CONFIG
+
+    return _with_conn(go)
+
+
+def svc_set_cpu_limits(uuid: str, shares: int = 0, cap_pct: int = 0,
+                       period: int = 100000) -> str:
+    """How much host CPU this machine may take when something else wants it.
+
+    Two different things, both in <cputune>:
+
+    - `shares` is a weight, not a limit. It only matters when the host is
+      oversubscribed, and then a machine with 2048 gets twice the CPU of one
+      with the default 1024. Costs nothing when the host is idle.
+    - `cap_pct` is a ceiling per vCPU, enforced whether the host is busy or
+      not: 50 means each vCPU may use half a host CPU. This is the one that
+      makes a guest feel slow on an idle machine, so it is off by default.
+
+    Zero for either leaves it unset. Applied live where libvirt allows it,
+    which for these it does.
+    """
+    if shares and not 2 <= shares <= 262144:
+        raise ValueError("CPU shares must be between 2 and 262144")
+    if cap_pct and not 1 <= cap_pct <= 100:
+        raise ValueError("The CPU cap is a percentage of one vCPU, 1 to 100")
+
+    def go(conn):
+        dom = conn.lookupByUUIDString(uuid)
+        root = ET.fromstring(dom.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE))
+        cputune = root.find("cputune")
+        if cputune is None:
+            cputune = ET.SubElement(root, "cputune")
+        for tag in ("shares", "quota", "period"):
+            found = cputune.find(tag)
+            if found is not None:
+                cputune.remove(found)
+        if shares:
+            ET.SubElement(cputune, "shares").text = str(shares)
+        if cap_pct:
+            # quota and period are microseconds of CPU time per vCPU
+            ET.SubElement(cputune, "period").text = str(period)
+            ET.SubElement(cputune, "quota").text = str(
+                int(period * cap_pct / 100)
+            )
+        if len(cputune) == 0:
+            root.remove(cputune)
+        conn.defineXML(ET.tostring(root, encoding="unicode"))
+
+        if dom.isActive():
+            params = {}
+            if shares:
+                params["cpu_shares"] = shares
+            if cap_pct:
+                params["vcpu_period"] = period
+                params["vcpu_quota"] = int(period * cap_pct / 100)
+            elif cputune.find("quota") is None:
+                params["vcpu_quota"] = -1  # lift a cap that was there
+            if params:
+                try:
+                    dom.setSchedulerParameters(params)
+                    return _APPLIED_LIVE
+                except (libvirt.libvirtError, LookupError):
+                    # LookupError, not libvirtError, is what a driver that
+                    # has never heard of the parameter raises - the change
+                    # is already in the definition either way.
+                    pass
         return _APPLIED_CONFIG
 
     return _with_conn(go)

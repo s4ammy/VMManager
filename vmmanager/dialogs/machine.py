@@ -9,19 +9,13 @@ from PySide6.QtGui import QColor, QIcon
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
-    QDialog,
-    QDoubleSpinBox,
     QFileDialog,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QListWidget,
     QPushButton,
-    QRadioButton,
     QSpinBox,
-    QStackedWidget,
-    QTableWidget,
-    QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -927,3 +921,61 @@ class UsbRulesDialog(SizedDialog):
             if item.checkState() == Qt.CheckState.Checked:
                 out.append(item.data(Qt.ItemDataRole.UserRole))
         return out
+
+
+class StartCheckDialog(SizedDialog):
+    """What about this host would stop a machine starting.
+
+    Opened after a failed start, and from the machine's menu when someone
+    wants to look before trying. Reads only - every fix it points at lives
+    somewhere else in the app, and is named rather than done from here.
+    """
+
+    def __init__(self, parent, vm_name: str, problems, libvirt_said: str = "") -> None:
+        super().__init__(parent)
+        from .. import theme
+
+        self.setWindowTitle("Start check")
+        self.setMinimumWidth(640)
+        box = QVBoxLayout(self)
+        box.setContentsMargins(24, 22, 24, 20)
+        box.setSpacing(10)
+        box.addWidget(_title(f"Why {vm_name} will not start"))
+
+        if libvirt_said:
+            said = QLabel(f"libvirt said: {libvirt_said}")
+            said.setWordWrap(True)
+            said.setObjectName("ConsoleHint")
+            box.addWidget(said)
+
+        if not problems:
+            good = QLabel(
+                "Nothing about this host looks wrong: the disks are where "
+                "the definition says, the memory is available, and any "
+                "assigned devices are free. Whatever libvirt reported is "
+                "the whole story."
+            )
+            good.setWordWrap(True)
+            box.addWidget(good)
+        colours = {"blocked": theme.DANGER, "caution": theme.WARN}
+        for problem in problems:
+            row = QHBoxLayout()
+            mark = QLabel("●")
+            mark.setFixedWidth(18)
+            mark.setStyleSheet(f"color: {colours.get(problem.severity, theme.TEXT_DIM)};")
+            text = QLabel(f"<b>{problem.what}</b><br>{problem.why}")
+            text.setWordWrap(True)
+            text.setTextFormat(Qt.TextFormat.RichText)
+            text.setProperty("class", "Dim")
+            row.addWidget(mark, alignment=Qt.AlignmentFlag.AlignTop)
+            row.addWidget(text, 1)
+            box.addLayout(row)
+
+        box.addSpacing(6)
+        row = QHBoxLayout()
+        row.addStretch(1)
+        close = QPushButton("Close")
+        close.setProperty("class", "GhostButton")
+        close.clicked.connect(self.accept)
+        row.addWidget(close)
+        box.addLayout(row)

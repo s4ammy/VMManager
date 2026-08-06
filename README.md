@@ -23,13 +23,29 @@ it, and **[FEATURES.md](FEATURES.md)** for what it can do.
 Machines as rack bays. The strip down the left edge and the LED carry the state,
 a running machine draws its own CPU graph, and the host's own load sits in the
 corner of the sidebar. `SHUTOFF · DEBUG` is a machine with modes, showing which
-one it is on.
+one it is on, and `⚠ E:\ 100%` is the guest agent reporting a full disk inside
+the running one.
 
-![The hardware tab: a list of every device on the left, grouped into system, storage, network, display and peripherals, with the processor's details on the right](Previews/hardware.png)
+![A machine's overview tab: a row of chips naming its machine type, firmware, vCPUs, memory, video and boot order, above four live graphs for CPU, memory, disk and network](Previews/overview.png)
 
-Every device on the machine, grouped. Right-click a row to take it off; the panel
-on the right edits whatever is selected - and, as here, most of it while the
-machine is running.
+What a machine is and what it is doing, on one screen. The graphs are live while
+it runs, and the range picker goes back over recorded history rather than only
+showing the last few minutes.
+
+![The console tab showing a Windows 11 desktop running inside the machine, with send-key, paste and detach controls under it](Previews/console.png)
+
+The console is in the app, for both VNC and SPICE - here a Windows guest over
+SPICE, with the clipboard shared both ways. Click the display and the whole
+keyboard goes to the guest until you press the release combination. Detach it
+into its own window when you want it beside something else.
+
+![The hardware tab: a list of every device on the left, grouped into system, storage, network, display and peripherals; on the right the processor's model, sockets, cores, threads and chipset as editable fields](Previews/hardware.png)
+
+Every device on the machine, grouped. Right-click a row to take it off; the
+panel on the right is the editor - the fields are the controls themselves, so
+there is no Edit button to press first. Change one and Save and Discard appear,
+and only what you changed gets written. The **?** beside a field explains it on
+hover. Most of it applies while the machine is running.
 
 ![The history tab: a list of timestamps on the left and a coloured diff of the selected version against the current one on the right](Previews/history.png)
 
@@ -38,6 +54,8 @@ changed, and restore it if you want it back.
 
 ## A few things it does that virt-manager does not
 
+- **Unattended Windows installs**, the counterpart to cloud-init - including
+  the virtio driver Setup needs to see the disk at all.
 - **Cloud images in the wizard.** Pick Debian, Ubuntu, AlmaLinux, Rocky or Arch;
   it downloads, verifies, imports and fills in the defaults.
 - **Templates and linked clones.** Deploy a copy-on-write clone in under a
@@ -62,6 +80,10 @@ changed, and restore it if you want it back.
   display manager and driver - shown in full before they are written.
 - **CPU isolation while a machine runs**, so the host stops scheduling its own
   work onto the cores the guest is pinned to.
+- **Hardware you edit in place.** Every property of a device is a field on its
+  faceplate - a disk's serial and discard mode, a display's listen address,
+  port and password - rather than a reading you have to go to raw XML to
+  change.
 
 Plus a command palette, scheduled snapshots and power schedules (with a
 background service so they fire while the app is closed), live disk moves
@@ -77,7 +99,7 @@ the interface. [Details](INSTALL.md#what-it-needs).
 
 ## Contributing
 
-`.venv/bin/python -m pytest -q` runs 701 tests in about 10 seconds against
+`.venv/bin/python -m pytest -q` runs 800 tests in about 12 seconds against
 libvirt's fake hypervisor - no real machines involved, no display needed.
 **[DEVELOPING.md](DEVELOPING.md)** covers how the code is arranged, what the
 tests are for, and the rules they enforce.

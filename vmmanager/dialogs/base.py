@@ -3,25 +3,14 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QEvent, Qt
-from PySide6.QtGui import QColor, QGuiApplication
+from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
-    QCheckBox,
-    QComboBox,
     QDialog,
-    QDoubleSpinBox,
-    QFileDialog,
     QHBoxLayout,
     QLabel,
     QLineEdit,
-    QListWidget,
     QPushButton,
-    QRadioButton,
-    QSpinBox,
-    QStackedWidget,
-    QTableWidget,
-    QTableWidgetItem,
     QVBoxLayout,
-    QWidget,
 )
 
 

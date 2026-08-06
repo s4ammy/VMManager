@@ -54,6 +54,13 @@ jobs:
           print("libvirt", libvirt.getVersion(), "· test driver:", conn.getHostname())
           PY
 
+      - name: Lint
+        # Correctness rules only - see [tool.ruff] in pyproject.toml. This
+        # catches the class of bug that has actually shipped here: a name
+        # used but never imported, which only raises on the code path that
+        # reaches it. Two were found the day this was added.
+        run: .venv/bin/ruff check vmmanager tests
+
       - name: Run the tests
         # No display: conftest asks Qt for the offscreen platform.
         run: .venv/bin/python -m pytest -q

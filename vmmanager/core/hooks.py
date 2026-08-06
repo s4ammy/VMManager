@@ -22,7 +22,7 @@ exactly as it is, with instructions instead.
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from .elevate import check_address, check_name, install_root_file, run_root_script
 from .tuning import format_cpuset

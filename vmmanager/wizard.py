@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
 )
 
 from .dialogs import SizedDialog, VolumePickerDialog
+from .core.unattend import EDITIONS, Unattend
 from .libvirt_service import CloudInit, CreateSpec, current_uri
 from .data.osinfo import OsVariant, detect_iso, list_os_variants
 from .tasks import run_task
@@ -299,6 +300,56 @@ class NewVmDialog(SizedDialog):
         box.addWidget(self._ci_widget)
         self.cloud_init.toggled.connect(self._ci_widget.setVisible)
 
+        # -- the same idea for Windows
+        self.unattend = QCheckBox(
+            "Unattended Windows install - answer Setup's questions in advance"
+        )
+        self.unattend.setToolTip(
+            "Writes an autounattend.xml onto a small disc Setup reads. It "
+            "also points Setup at the virtio storage driver, which is what "
+            "otherwise leaves it showing an empty disk list."
+        )
+        box.addWidget(self.unattend)
+        self._ua_widget = QWidget()
+        ua_box = QVBoxLayout(self._ua_widget)
+        ua_box.setContentsMargins(0, 0, 0, 0)
+        ua_box.setSpacing(8)
+        ua_row = QHBoxLayout()
+        uu_col = QVBoxLayout()
+        uu_col.addWidget(_field_label("user"))
+        self.ua_user = QLineEdit(os.environ.get("USER", "admin"))
+        uu_col.addWidget(self.ua_user)
+        up_col = QVBoxLayout()
+        up_col.addWidget(_field_label("password"))
+        self.ua_password = QLineEdit()
+        self.ua_password.setEchoMode(QLineEdit.EchoMode.Password)
+        up_col.addWidget(self.ua_password)
+        ue_col = QVBoxLayout()
+        ue_col.addWidget(_field_label("edition"))
+        self.ua_edition = QComboBox()
+        self.ua_edition.addItems(list(EDITIONS))
+        self.ua_edition.setEditable(True)
+        self.ua_edition.setToolTip(
+            "Must match what the ISO calls it, exactly - Setup matches on "
+            "this name and stops to ask if it finds nothing."
+        )
+        ue_col.addWidget(self.ua_edition)
+        ua_row.addLayout(uu_col)
+        ua_row.addLayout(up_col)
+        ua_row.addLayout(ue_col)
+        ua_box.addLayout(ua_row)
+        ua_note = QLabel(
+            "The machine needs the virtio-win disc attached as well, which "
+            "is where the driver comes from - add it from the hardware tab "
+            "before starting, or the install will not find the disk."
+        )
+        ua_note.setWordWrap(True)
+        ua_note.setObjectName("ConsoleHint")
+        ua_box.addWidget(ua_note)
+        self._ua_widget.hide()
+        box.addWidget(self._ua_widget)
+        self.unattend.toggled.connect(self._ua_widget.setVisible)
+
         box.addSpacing(8)
         buttons = QHBoxLayout()
         buttons.addStretch(1)
@@ -405,6 +456,11 @@ class NewVmDialog(SizedDialog):
         )
         if self.src_url.isChecked():
             self.cloud_init.setChecked(False)
+        # An answer file is read by Windows Setup, so it only means anything
+        # for an install from an ISO.
+        self.unattend.setEnabled(self.src_iso.isChecked() and not from_template)
+        if not self.unattend.isEnabled():
+            self.unattend.setChecked(False)
 
     def _pick_iso(self) -> None:
         settings = QSettings("vmmanager", "vmmanager")
@@ -504,6 +560,19 @@ class NewVmDialog(SizedDialog):
                 ssh_key=self.ci_key.text().strip(),
                 packages=packages,
             )
+        unattend = None
+        if self.unattend.isChecked() and self.ua_user.text().strip():
+            variant = self.selected_variant()
+            unattend = Unattend(
+                user=self.ua_user.text().strip(),
+                password=self.ua_password.text(),
+                hostname=self.name.text().strip(),
+                edition=self.ua_edition.currentText().strip(),
+                windows_version=(
+                    "w10" if variant and "win10" in (variant.short_id or "")
+                    else "w11"
+                ),
+            )
         return CreateSpec(
             name=self.name.text().strip(),
             vcpus=self.vcpus.value(),
@@ -523,6 +592,7 @@ class NewVmDialog(SizedDialog):
             ),
             osinfo_id=variant.osinfo_id if variant else "",
             cloudinit=cloudinit,
+            unattend=unattend,
             location_url=(
                 self.location_url.text().strip() if self.src_url.isChecked() else ""
             ),

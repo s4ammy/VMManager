@@ -38,7 +38,7 @@ dependencies = [
 # usually the right way to get these (python-gobject + spice-gtk), which is why
 # they are not required: without them the VNC console still works.
 spice = ["PyGObject>=3.44"]
-dev = ["pytest>=8", "pytest-qt>=4"]
+dev = ["pytest>=8", "pytest-qt>=4", "ruff>=0.6"]
 
 [project.gui-scripts]
 vmmanager = "vmmanager.__main__:main"
@@ -64,3 +64,26 @@ vmmanager = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 filterwarnings = ["error::DeprecationWarning:vmmanager.*"]
+
+
+[tool.ruff]
+# What the package says it supports. Worth pinning: a backslash inside an
+# f-string parses on 3.12 and is a syntax error on 3.11, and one had already
+# reached core/networks.py where nothing running 3.12+ would ever notice.
+target-version = "py311"
+
+[tool.ruff.lint]
+# Correctness only. The style and import-order rules would rewrite most of
+# the tree without changing behaviour, and the import grouping here is
+# deliberate - this is a gate for bugs, not a formatter.
+select = ["E9", "F"]
+# The detail tabs share one set of imports through `from .common import *`,
+# which is documented and load-bearing; F403/F405 flag every use of it.
+ignore = ["F403", "F405"]
+
+[tool.ruff.lint.per-file-ignores]
+# Modules whose job is to re-export: the names look unused where they are
+# written and are the whole point of the file.
+"vmmanager/libvirt_service.py" = ["F401"]
+"vmmanager/pages/detail/common.py" = ["F401"]
+"**/__init__.py" = ["F401"]

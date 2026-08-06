@@ -57,6 +57,11 @@ class DetailPage(
         self._detached: DetachedConsoleWindow | None = None
         self._detached_client = None
         self._hw_view_mode = "details"
+        self._boot_draft: list | None = None   # a boot order being rearranged
+        self._hw_showing = None                # which device the faceplate is on
+        self._machine_types: list[str] = []
+        self._fields: list = []
+        self._field_bar = None
         self._tuning = None
         self._topology = None
         self._features = None

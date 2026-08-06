@@ -14,8 +14,8 @@ from .base import (  # noqa: F401
     _title,
 )
 from .console import VncPasswordDialog  # noqa: F401
-from .hardware import AttachDiskDialog, AttachNicDialog, BootOrderDialog, ChoiceDialog, CpuDialog, DiskCacheDialog, DisplayFixDialog, GuestFeaturesDialog, HostDeviceDialog, HostdevOptionsDialog, LabelsDialog, MdevDialog, MemoryDialog, MoveDiskDialog, NicEditDialog, PassthroughDialog, ShareFolderDialog, SingleGpuDialog, TuningDialog, VideoDialog, VirtioIsoDialog, WindowsToolingDialog  # noqa: F401
-from .machine import CatalogDialog, CloneDetailsDialog, CloneDialog, ConnectionDialog, OsIconDialog, DeleteVmDialog, MigrateDialog, ModesDialog, ScheduleDialog, UsbRulesDialog, WakeScheduleDialog  # noqa: F401
+from .hardware import AttachDiskDialog, AttachNicDialog, ChoiceDialog, DisplayFixDialog, GrowDiskDialog, GuestFeaturesDialog, HostDeviceDialog, MdevDialog, MoveDiskDialog, PassthroughDialog, ShareFolderDialog, SingleGpuDialog, TuningDialog, _tuning_cpu_limits, VirtioIsoDialog, WindowsToolingDialog  # noqa: F401
+from .machine import CatalogDialog, CloneDetailsDialog, CloneDialog, ConnectionDialog, OsIconDialog, DeleteVmDialog, MigrateDialog, ModesDialog, ScheduleDialog, StartCheckDialog, UsbRulesDialog, WakeScheduleDialog  # noqa: F401
 from .network import NetworkDetailsDialog, NetworkDialog, NwFiltersDialog  # noqa: F401
 from .snapshot import SnapshotDialog  # noqa: F401
 from .storage import NewPoolDialog, PoolDialog, ResizeVolumeDialog, VolumeDialog, VolumePickerDialog  # noqa: F401
@@ -26,27 +26,21 @@ __all__ = [
     "NetworkDetailsDialog",
     "PoolDialog",
     "CloneDetailsDialog",
-    "NicEditDialog",
-    "LabelsDialog",
-    "HostdevOptionsDialog",
     "ChoiceDialog",
     "ConnectionDialog",
     "AttachDiskDialog",
     "AttachNicDialog",
-    "BootOrderDialog",
     "CatalogDialog",
     "CloneDialog",
     "ConfirmDialog",
-    "CpuDialog",
     "DeleteVmDialog",
-    "DiskCacheDialog",
+    "GrowDiskDialog",
     "MdevDialog",
     "SingleGpuDialog",
     "MoveDiskDialog",
     "DisplayFixDialog",
     "ErrorDialog",
     "HostDeviceDialog",
-    "MemoryDialog",
     "MigrateDialog",
     "NetworkDialog",
     "NwFiltersDialog",
@@ -55,9 +49,9 @@ __all__ = [
     "PassthroughDialog",
     "ResizeVolumeDialog",
     "ScheduleDialog",
+    "StartCheckDialog",
     "ShareFolderDialog",
     "SnapshotDialog",
-    "VideoDialog",
     "VirtioIsoDialog",
     "VncPasswordDialog",
     "VolumeDialog",

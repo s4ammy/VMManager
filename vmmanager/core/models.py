@@ -54,6 +54,29 @@ class DiskInfo:
     format: str
     device: str  # disk | cdrom | floppy
     cache: str = "default"
+    readonly: bool = False
+    shareable: bool = False
+    serial: str = ""      # what the guest sees as the drive's serial number
+    discard: str = ""     # unmap passes TRIM through to the host file
+
+@dataclass(frozen=True)
+class GraphicsDetail:
+    """One <graphics> device, in full.
+
+    `ident` is how the hardware bay names it - the port, or the address it
+    listens on when the port is left to libvirt. See display_ident().
+    """
+
+    type: str            # vnc | spice | egl-headless | …
+    ident: str
+    listen_type: str = "address"   # address | socket | none
+    address: str = ""
+    port: int = -1
+    autoport: bool = True
+    password: str = ""
+    gl: bool = False     # SPICE local rendering through the host GPU
+    socket: str = ""
+
 
 @dataclass(frozen=True)
 class NicInfo:
@@ -61,6 +84,7 @@ class NicInfo:
     source: str
     model: str
     filter: str = ""  # nwfilter name from <filterref>, "" when none
+    link_up: bool = True  # <link state='down'/> is a cable pulled out
 
 @dataclass(frozen=True)
 class MdevType:
@@ -101,6 +125,8 @@ class HostdevInfo:
     # match devices on kind and ident alone.
     rom_file: str = field(default="", compare=False)
     rom_bar: bool = field(default=True, compare=False)
+    # usb only: what libvirt does when the device is not plugged in at start
+    startup_policy: str = field(default="mandatory", compare=False)
 
 @dataclass(frozen=True)
 class FsShareInfo:
@@ -120,7 +146,7 @@ class Hardware:
     nics: tuple[NicInfo, ...]
     hostdevs: tuple[HostdevInfo, ...]
     filesystems: tuple[FsShareInfo, ...]
-    graphics: tuple[tuple[str, str], ...]  # type, port/listen
+    graphics: tuple[GraphicsDetail, ...]
     video: str
     boot: tuple[str, ...]  # os-level boot devs, or per-device entries
     topology: tuple[int, int, int] | None = None  # sockets, cores, threads
@@ -138,6 +164,14 @@ class Hardware:
     audio: str = ""  # backend type
     memory_devices: tuple[int, ...] = ()  # DIMM sizes in MiB
     controllers: tuple[tuple[str, int, str], ...] = ()  # (type, index, model)
+    # What the machine is, rather than what it has. Read-only, for the
+    # overview: the things you need when reporting a problem or matching a
+    # definition against a host.
+    uuid: str = ""
+    hypervisor: str = ""   # the domain's type: kvm, qemu, xen…
+    arch: str = ""
+    emulator: str = ""     # the qemu binary libvirt will run
+    shared_memory: bool = False  # <memoryBacking><access mode='shared'/>
 
 @dataclass(frozen=True)
 class SnapshotInfo:
@@ -207,6 +241,7 @@ class CreateSpec:
     iso_path: str | None = None
     osinfo_id: str = ""
     cloudinit: CloudInit | None = None
+    unattend: object | None = None  # Unattend, for a Windows install
     # network install: a distro install tree (http/ftp/nfs). Handed to
     # virt-install, which fetches the kernel and initrd out of it for us.
     location_url: str = ""

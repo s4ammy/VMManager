@@ -5,20 +5,24 @@ from __future__ import annotations
 import datetime
 import time
 
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import QPoint, QRect, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QImage
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QComboBox,
     QDialog,
     QFileDialog,
     QFrame,
     QGridLayout,
     QHBoxLayout,
+    QLayout,
+    QLineEdit,
     QLabel,
     QMenu,
     QPlainTextEdit,
     QPushButton,
+    QSpinBox,
     QScrollArea,
     QSlider,
     QTableWidget,
@@ -30,29 +34,22 @@ from PySide6.QtWidgets import (
 
 from ... import theme
 from ...dialogs import (
-    ChoiceDialog,
-    HostdevOptionsDialog,
-    LabelsDialog,
-    NicEditDialog,
     AttachDiskDialog,
     AttachNicDialog,
-    BootOrderDialog,
     ConfirmDialog,
-    CpuDialog,
-    DiskCacheDialog,
+    GrowDiskDialog,
     MdevDialog,
     SingleGpuDialog,
     MoveDiskDialog,
     DisplayFixDialog,
     ErrorDialog,
     HostDeviceDialog,
-    MemoryDialog,
     PassthroughDialog,
     GuestFeaturesDialog,
     ShareFolderDialog,
     TuningDialog,
+    _tuning_cpu_limits,
     SnapshotDialog,
-    VideoDialog,
     VirtioIsoDialog,
     VncPasswordDialog,
     VolumePickerDialog,
@@ -61,6 +58,7 @@ from ...dialogs import (
 from ...data.history import data_extent, query_history
 from ...libvirt_service import (
     AUDIO_BACKENDS,
+    CONTROLLER_MODELS,
     KEY_COMBOS,
     PANIC_MODELS,
     WATCHDOG_ACTIONS,
@@ -109,6 +107,7 @@ from ...libvirt_service import (
     svc_list_network_names,
     svc_list_pools,
     svc_move_disk,
+    svc_grow_disk,
     svc_mdev_types,
     svc_list_mdevs,
     svc_create_mdev,
@@ -151,9 +150,14 @@ from ...libvirt_service import (
     svc_machine_types,
     svc_remove_simple_device,
     svc_set_boot_menu,
+    svc_set_disk_options,
+    svc_set_graphics,
+    svc_set_display_type,
+    svc_set_shared_memory,
     svc_set_controller_model,
     svc_set_hostdev_options,
     svc_set_cpu_pinning,
+    svc_set_cpu_limits,
     svc_set_disk_throttle,
     svc_set_hugepages,
     svc_set_iothreads,
@@ -183,7 +187,7 @@ from ...libvirt_service import (
 from ...console.serialterm import SerialSession, TerminalWidget
 from ...console.spice import SPICE_AVAILABLE, SpiceClient
 from ...logs import log
-from ...tasks import run_task
+from ...tasks import connect_guarded, run_task
 from ...console.tunnel import SSHTunnel, is_remote_uri, ssh_target_of
 from ...console.vnc import VncClient
 from ...widgets import Led, Sparkline, flow_row, fmt_bytes, fmt_mem

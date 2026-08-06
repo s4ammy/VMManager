@@ -69,6 +69,7 @@ class ConsoleMixin:
         self.spice.mouse_mode_changed.connect(self._spice_mouse_hint)
         self.spice.capture_changed.connect(self._spice_capture_changed)
         self.spice.grab_changed.connect(self._grab_changed)
+        self.spice.usb_changed.connect(self._on_usb_changed)
         self.console_stack = QStackedWidget()
         self.console_stack.setMinimumHeight(300)
         self.console_stack.addWidget(self.vnc)
@@ -190,12 +191,58 @@ class ConsoleMixin:
                 menu.addAction("Release the keyboard", client.release_input)
             else:
                 menu.addAction("Send every key to the guest", client.take_input)
+        self._add_usb_menu(menu)
         menu.addAction("Save screenshot…", self._save_screenshot)
         menu.addAction(
             "Open in virt-viewer",
             lambda: self.uuid and open_external(self.uuid, "viewer"),
         )
         menu.exec(anchor.mapToGlobal(anchor.rect().bottomLeft()))
+
+    def _add_usb_menu(self, menu: QMenu) -> None:
+        """Send a host USB device to the guest for as long as it is plugged in.
+
+        Different from handing the device over as hardware: this goes over
+        the SPICE connection, the host keeps ownership, and unplugging it
+        gives it straight back. Needs a USB redirection channel on the
+        machine, which is what the empty case points at.
+        """
+        client = self._active_client()
+        if not isinstance(client, SpiceClient) or not client.active:
+            return
+        devices = client.usb_devices()
+        # Built with the parent menu as its owner rather than by
+        # menu.addMenu("…"): that hands back a submenu nothing holds a
+        # reference to, and it can be collected before the menu is shown.
+        usb = QMenu("USB device", menu)
+        menu.addMenu(usb)
+        if not devices:
+            nothing = usb.addAction("No USB devices to redirect")
+            nothing.setEnabled(False)
+            return
+        for device, label, connected in devices:
+            action = usb.addAction(
+                f"{'✓ ' if connected else ''}{label}",
+                lambda _=False, d=device, c=connected: self._redirect_usb(d, not c),
+            )
+            action.setCheckable(True)
+            action.setChecked(connected)
+
+    def _redirect_usb(self, device, connect: bool) -> None:
+        client = self._active_client()
+        if not isinstance(client, SpiceClient):
+            return
+        self.console_hint.setText(
+            "sending the device to the guest…" if connect
+            else "taking the device back…"
+        )
+        client.redirect_usb(device, connect)
+
+    def _on_usb_changed(self, error: str) -> None:
+        if error:
+            self._set_hint(f"USB redirection failed: {error}")
+            return
+        self._set_hint(self._connected_hint())
 
     def _active_client(self):
         if self.spice.active:

@@ -18,16 +18,33 @@ UI_DIRS = ("pages", "dialogs", "widgets")
 UI_FILES = ("main_window.py", "wizard.py", "tasks.py", "topology.py", "palette.py")
 
 
+# Faceplate fields register an applier rather than calling run_task
+# themselves: _save_fields is what runs them, inside a worker. The argument
+# that holds the applier, per registrar.
+APPLIER_ARG = {"_panel_field": 3, "_panel_watch": 2}
+
+
 def _worker_names(tree: ast.Module) -> set[str]:
-    """Callables this module passes to run_task."""
+    """Callables this module hands to run_task, directly or through a field."""
     names: set[str] = set()
     for node in ast.walk(tree):
-        if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "run_task":
+        if not isinstance(node, ast.Call):
+            continue
+        called = getattr(node.func, "id", "") or getattr(node.func, "attr", "")
+        if called == "run_task":
             for arg in list(node.args) + [kw.value for kw in node.keywords]:
                 if isinstance(arg, ast.Name):
                     names.add(arg.id)
                 elif isinstance(arg, ast.Lambda):
                     names.add("<lambda>")
+        elif called in APPLIER_ARG:
+            index = APPLIER_ARG[called]
+            applier = node.args[index] if len(node.args) > index else None
+            if isinstance(applier, ast.Name):
+                names.add(applier.id)
+            for kw in node.keywords:
+                if kw.arg == "apply" and isinstance(kw.value, ast.Name):
+                    names.add(kw.value.id)
     return names
 
 
@@ -83,6 +100,22 @@ def test_the_detector_catches_a_planted_violation(tmp_path):
     assert [(line, name) for line, name, _ in _offenders(sample)] == [
         (3, "svc_list_pools")
     ]
+
+
+def test_a_field_applier_counts_as_a_worker(tmp_path):
+    """_save_fields runs these inside run_task, so they are not offenders -
+    but only the argument that actually holds the applier."""
+    sample = tmp_path / "field.py"
+    sample.write_text(
+        "class P:\n"
+        "    def face(self):\n"
+        "        def save(v):\n"
+        "            return svc_set_memory(self.uuid, v)\n"
+        "        def read():\n"
+        "            return svc_get_memory()\n"
+        "        self._panel_field('mem', box, read, save)\n"
+    )
+    assert [name for _line, name, _w in _offenders(sample)] == ["svc_get_memory"]
 
 
 def test_no_service_call_runs_on_the_ui_thread():

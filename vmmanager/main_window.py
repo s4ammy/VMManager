@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import QTimer
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QDialog,
@@ -20,6 +20,7 @@ from .dialogs import (
     CloneDialog,
     ConfirmDialog,
     DeleteVmDialog,
+    StartCheckDialog,
     ErrorDialog,
     MigrateDialog,
     ModesDialog,
@@ -36,7 +37,6 @@ from .libvirt_service import (
     current_uri,
     set_poll_seconds,
     set_uri,
-    svc_clone,
     svc_clone_advanced,
     svc_create_snapshot,
     svc_create_vm,
@@ -49,7 +49,6 @@ from .libvirt_service import (
     svc_list_network_names,
     svc_list_pools,
     svc_linked_clone,
-    svc_migrate,
     svc_migrate_advanced,
     svc_prune_snapshots,
     svc_attach_hostdev,
@@ -60,6 +59,7 @@ from .libvirt_service import (
     usb_auto_attach_plan,
     svc_save_to_file,
     svc_set_on_crash,
+    svc_start_problems,
     svc_backing_chain,
     svc_delete_mode,
     svc_list_modes,
@@ -91,7 +91,7 @@ from .pages.settings import (
     saved_poll_seconds,
 )
 from .pages.storage import StoragePage
-from .tasks import run_task
+from .tasks import connect_guarded, run_task
 from . import APP_NAME
 from .logs import log
 from .widgets import Sidebar
@@ -454,10 +454,33 @@ class MainWindow(QMainWindow):
     # ---------------------------------------------------------------- actions
 
     def _domain_action(self, uuid: str, op: str) -> None:
+        def failed(message: str) -> None:
+            self.machines.show_action_error(message)
+            if op == "start":
+                # libvirt's reason for a failed start is accurate and rarely
+                # useful. Look at the host and say what about it the
+                # definition can no longer count on.
+                self._explain_start_failure(uuid, message)
+
         run_task(
             lambda: svc_domain_action(uuid, op),
             done=lambda _: self.worker.poke(),
-            failed=self.machines.show_action_error,
+            failed=failed,
+        )
+
+    def _explain_start_failure(self, uuid: str, message: str = "") -> None:
+        snap = self._snap_for(uuid)
+        name = snap.name if snap else "this machine"
+
+        def show(problems) -> None:
+            if not problems:
+                return  # the message libvirt gave is all there is
+            StartCheckDialog(self._owner, name, problems, message).exec()
+
+        run_task(
+            lambda: svc_start_problems(uuid),
+            done=show,
+            failed=lambda _m: None,  # a diagnosis that fails is not a bug
         )
 
     def _snap_for(self, uuid: str) -> DomainSnapshot | None:
@@ -533,6 +556,10 @@ class MainWindow(QMainWindow):
         menu.addAction("Power schedule…", lambda: self._edit_wake_schedule(snap))
         menu.addAction("Auto-restart on crash…", lambda: self._edit_on_crash(snap))
         menu.addAction("Auto-attach USB…", lambda: self._edit_usb_rules(snap))
+        menu.addAction(
+            "Why won't it start?…",
+            lambda: self._explain_start_failure(snap.uuid),
+        )
         if not running:
             menu.addAction("Export backup…", lambda: self._export_vm(snap))
         menu.addAction("Migrate…", lambda: self._migrate(snap))
@@ -970,7 +997,7 @@ class MainWindow(QMainWindow):
             forget_cached_pixmaps()
             self.machines.refresh_cards()
 
-        downloader.fetched.connect(arrived)
+        connect_guarded(downloader.fetched, arrived)
         downloader.start()
 
     def _set_template(self, snap: DomainSnapshot, on: bool) -> None:
