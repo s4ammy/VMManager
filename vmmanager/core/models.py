@@ -284,6 +284,17 @@ class DisplayHealth:
                 "resolution cannot be set from here. This is usually the whole "
                 "answer to a console that feels slow after installing drivers.",
             ))
+        if "spice" not in self.graphics:
+            out.append((
+                "spice",
+                "No SPICE display, so no shared clipboard",
+                "Copying between host and guest, and resizing the guest to "
+                "the window, are carried by the SPICE agent. A VNC display "
+                "has no way to do either, whatever is installed inside - "
+                "which is the answer to a clipboard that does nothing after "
+                "the guest tools went in. Adding a SPICE display and its "
+                "agent channel turns both on.",
+            ))
         if "spice" in self.graphics and not self.spice_agent_channel:
             out.append((
                 "agent",

@@ -268,3 +268,94 @@ def test_force_off_works_on_a_suspended_machine(monkeypatch):
     dom = _FakeDomain(libvirt.VIR_DOMAIN_PMSUSPENDED)
     _run_action(monkeypatch, dom, "force-off")
     assert dom.called == ["destroy"]
+
+
+# -- taking a display off, when there is more than one to choose from
+
+
+TWO_DISPLAYS = """
+<domain type='test'>
+  <name>twoheads</name>
+  <memory unit='MiB'>64</memory>
+  <os><type>hvm</type></os>
+  <devices>
+    <graphics type='vnc' port='-1' autoport='yes'/>
+    <graphics type='spice' port='-1' autoport='yes'/>
+    <video><model type='virtio'/></video>
+  </devices>
+</domain>
+"""
+
+
+@pytest.fixture
+def twoheads(testconn):
+    dom = testconn.defineXML(TWO_DISPLAYS)
+    yield dom
+    dom.undefine()
+
+
+def _displays(dom):
+    import xml.etree.ElementTree as ET
+
+    import libvirt
+
+    root = ET.fromstring(dom.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE))
+    return [g.get("type") for g in root.findall("devices/graphics")]
+
+
+def test_removing_one_display_leaves_the_other(twoheads):
+    """The whole reason this is not svc_remove_simple_device: that would
+    take whichever came first, and which one you get decides whether the
+    console runs over VNC or SPICE."""
+    from vmmanager.libvirt_service import svc_remove_display
+
+    assert _displays(twoheads) == ["vnc", "spice"]
+    svc_remove_display(twoheads.UUIDString(), "vnc", "-1")
+    assert _displays(twoheads) == ["spice"]
+
+
+def test_removing_a_display_type_that_is_not_there_says_so(twoheads):
+    from vmmanager.libvirt_service import svc_remove_display
+
+    with pytest.raises(RuntimeError, match="no egl-headless display"):
+        svc_remove_display(twoheads.UUIDString(), "egl-headless", "-1")
+    assert _displays(twoheads) == ["vnc", "spice"], "nothing should have gone"
+
+
+def test_a_stale_identity_still_removes_the_only_display_of_that_type(twoheads):
+    """libvirt drops port='-1' from an autoport display as it defines it, so
+    the identity a row was drawn with is often not the one on disk a moment
+    later. With one display of that type there is nothing to be ambiguous
+    about, and the click should still work."""
+    from vmmanager.libvirt_service import svc_remove_display
+
+    svc_remove_display(twoheads.UUIDString(), "spice", "a-stale-identity")
+    assert _displays(twoheads) == ["vnc"]
+
+
+def test_a_machine_may_end_up_with_no_display_at_all(twoheads):
+    """Which is a passthrough machine, not a mistake."""
+    from vmmanager.libvirt_service import svc_remove_display
+
+    uuid = twoheads.UUIDString()
+    svc_remove_display(uuid, "vnc", "-1")
+    svc_remove_display(uuid, "spice", "-1")
+    assert _displays(twoheads) == []
+
+
+def test_removing_the_video_adapter_warns_while_a_display_remains(twoheads):
+    import xml.etree.ElementTree as ET
+
+    import libvirt
+
+    from vmmanager.libvirt_service import svc_remove_display, svc_remove_video
+
+    uuid = twoheads.UUIDString()
+    message = svc_remove_video(uuid)
+    assert "libvirt gives" in message, "should say why it may come back"
+
+    svc_remove_display(uuid, "vnc", "-1")
+    svc_remove_display(uuid, "spice", "-1")
+    svc_remove_video(uuid)  # whatever libvirt put back
+    root = ET.fromstring(twoheads.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE))
+    assert root.find("devices/video") is None

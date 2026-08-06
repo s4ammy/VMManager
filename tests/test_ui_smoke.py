@@ -469,6 +469,11 @@ def hardware_page(qapp, testconn):
     ("smartcard", "passthrough", "Remove smartcard"),
     ("dimm", 1024, "Remove memory device"),
     ("audio", "none", "Remove audio device"),
+    # A machine can hold a VNC and a SPICE display at once, and which one is
+    # taken off decides which protocol the console uses - so the row carries
+    # the type and port, and the remover is told which to take.
+    ("gfx", ("vnc", "-1"), "Remove display"),
+    ("video", None, "Remove video adapter"),
 ])
 def test_a_removable_row_offers_to_remove_it(qapp, testconn, kind, payload,
                                              expected):
@@ -483,7 +488,7 @@ def test_a_removable_row_offers_to_remove_it(qapp, testconn, kind, payload,
 
 
 @pytest.mark.parametrize("kind", [
-    "cpu", "mem", "boot", "labels", "tune", "features", "video", "gfx",
+    "cpu", "mem", "boot", "labels", "tune", "features",
     "controller", "ports",
 ])
 def test_a_row_that_is_not_a_device_says_so(qapp, testconn, kind):
@@ -510,7 +515,8 @@ def test_every_removable_kind_has_a_name_and_a_remover(qapp, testconn):
 
     page = hardware_page(qapp, testconn)
     try:
-        payloads = {"input": ("tablet", "usb"), "sound": "ich9"}
+        payloads = {"input": ("tablet", "usb"), "sound": "ich9",
+                    "gfx": ("vnc", "-1")}
         for kind in HardwareMixin.HW_REMOVABLE:
             assert page._hw_remover(kind, payloads.get(kind)) is not None, (
                 f"{kind} is listed as removable but nothing removes it"

@@ -210,6 +210,13 @@ class VncClient(QWidget):
         self._image: QImage | None = None
         self._zlib = None
         self._password = ""
+        # Same automatic clipboard as the SPICE client. QEMU only forwards
+        # ClientCutText where it has a vdagent bridge, so this reaches fewer
+        # guests - but sending it costs nothing and the alternative is a
+        # menu item nobody finds.
+        self._clipboard_out = ""
+        self._clipboard_in = ""
+        QApplication.clipboard().dataChanged.connect(self._host_clipboard_changed)
         self._minor = 8
         self._buttons = 0
         self._active = False
@@ -564,7 +571,9 @@ class VncClient(QWidget):
         (n,) = struct.unpack(">3xI", data)
 
         def got(text: bytes) -> None:
-            QApplication.clipboard().setText(text.decode("latin-1", "replace"))
+            decoded = text.decode("latin-1", "replace")
+            self._clipboard_in = decoded  # so it is not offered back
+            QApplication.clipboard().setText(decoded)
             self._expect(1, self._on_message_type)
 
         self._expect(n, got)
@@ -886,10 +895,20 @@ class VncClient(QWidget):
 
     # -- clipboard / typing
 
+    def _host_clipboard_changed(self) -> None:
+        """Copying on the host offers it to the guest, without a menu."""
+        if not self._active:
+            return
+        text = QApplication.clipboard().text()
+        if not text or text == self._clipboard_in or text == self._clipboard_out:
+            return
+        self.send_clipboard(text)
+
     def send_clipboard(self, text: str) -> None:
         """ClientCutText - lands in the guest clipboard if it runs an agent."""
         if not self._active:
             return
+        self._clipboard_out = text
         data = text.encode("latin-1", "replace")
         self._send(struct.pack(">BxxxI", 6, len(data)) + data)
 

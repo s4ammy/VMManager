@@ -15,10 +15,41 @@ from PySide6.QtCore import QThread, Signal
 
 from ..logs import log
 from .connection import HISTORY_LEN, STATE_NAMES, current_uri, poll_seconds
+
 from .domains import _read_vmm_meta
 from .events import DomainWatch, EventPump, ensure_registered
 from .osident import detect_key
 from .models import DomainSnapshot, HostSnapshot, Usage, _fmt_version
+
+# How often the balloon driver reports guest memory, in seconds. Cheap: the
+# guest writes a few counters, and nothing reads them in between.
+BALLOON_STATS_PERIOD = 5
+
+
+def guest_memory_kb(raw: dict) -> float:
+    """What the guest is actually using, from libvirt's balloon stats.
+
+    In order of truthfulness:
+
+    - `available` minus `usable` is the guest's own view - everything it has
+      minus what it could still hand out - which is what its task manager
+      shows. Only present once the balloon driver is reporting stats.
+    - `current` is the balloon's size: what the guest has been *given*, not
+      what it is using. For a machine that has never been ballooned this is
+      simply its maximum, which is why an unconfigured guest used to sit
+      pinned at 100%.
+    - `rss` is the host's resident footprint for the whole qemu process,
+      guest memory plus emulator overhead, so it can exceed the guest's own
+      maximum. A last resort.
+    """
+    available = raw.get("balloon.available")
+    usable = raw.get("balloon.usable")
+    if available is not None and usable is not None and available >= usable:
+        return float(available - usable)
+    current = raw.get("balloon.current")
+    if current is not None:
+        return float(current)
+    return float(raw.get("balloon.rss", 0))
 
 def stat_polling() -> dict:
     """Which statistics the user wants collected (all of them by default)."""
@@ -54,6 +85,7 @@ class PollWorker(QThread):
         self._facts: dict[str, tuple[list[str], list[str], str]] = {}
         self._meta: dict[str, tuple[bool, tuple[str, ...], str]] = {}
         self._flags: dict[str, tuple[bool, bool]] = {}  # autostart, has managed save
+        self._balloon_asked: set[str] = set()  # told to report guest memory
         self._host_facts: tuple[str, str, str, int, int] | None = None
         self._rescan_xml = True
         self._pump = EventPump()
@@ -66,6 +98,7 @@ class PollWorker(QThread):
 
     def _forget_all(self) -> None:
         self._rescan_xml = True
+        self._balloon_asked.clear()
         self._facts.clear()
         self._meta.clear()
         self._flags.clear()
@@ -100,10 +133,34 @@ class PollWorker(QThread):
 
     # -- stats helpers
 
+    def _enable_balloon_stats(self, uuid: str, dom, raw: dict) -> None:
+        """Ask the balloon driver to report what the guest is really using.
+
+        Without a stats period libvirt only knows `balloon.current` - what
+        the balloon was told to hold, which is the machine's maximum for a
+        guest that has never been ballooned - and `balloon.rss`, the host
+        footprint of the whole qemu process. Neither is what the guest is
+        using, and the first is why the memory graph sat pinned at the top.
+
+        Set live only: the machine's definition is not ours to rewrite for
+        a reading, and a restart just gets asked again on the next tick.
+        """
+        if "balloon.usable" in raw or "balloon.available" in raw:
+            return  # already reporting
+        if uuid in self._balloon_asked:
+            return  # asked once; a guest with no balloon driver never answers
+        self._balloon_asked.add(uuid)
+        try:
+            dom.setMemoryStatsPeriod(
+                BALLOON_STATS_PERIOD, libvirt.VIR_DOMAIN_AFFECT_LIVE
+            )
+        except libvirt.libvirtError:
+            pass  # no balloon device, or a driver that cannot; not fatal
+
     def _domain_usage(self, uuid: str, raw: dict, now: float, vcpus: int) -> Usage:
         prev = self._prev.get(uuid)
         self._prev[uuid] = (now, raw)
-        mem_kb = raw.get("balloon.rss", raw.get("balloon.current", 0))
+        mem_kb = guest_memory_kb(raw)
         if prev is None:
             return Usage(mem_mb=mem_kb / 1024)
         dt = now - prev[0]
@@ -246,6 +303,7 @@ class PollWorker(QThread):
             vcpus, memory_mb = self._sizing_of(dom, raw)
             hist = self._hist.setdefault(uuid, deque(maxlen=HISTORY_LEN))
             if state_name == "running" and raw:
+                self._enable_balloon_stats(uuid, dom, raw)
                 usage = self._domain_usage(uuid, raw, now, vcpus)
                 hist.append(usage)
             else:

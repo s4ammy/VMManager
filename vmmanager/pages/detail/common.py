@@ -135,6 +135,8 @@ from ...libvirt_service import (
     svc_list_snapshots,
     svc_qemu_cmdline,
     svc_remove_sound,
+    svc_remove_display,
+    svc_remove_video,
     svc_restore_backup,
     svc_revert_snapshot,
     svc_screenshot,
@@ -179,7 +181,7 @@ from ...libvirt_service import (
     open_external,
 )
 from ...console.serialterm import SerialSession, TerminalWidget
-from ...console.spice import SpiceClient
+from ...console.spice import SPICE_AVAILABLE, SpiceClient
 from ...logs import log
 from ...tasks import run_task
 from ...console.tunnel import SSHTunnel, is_remote_uri, ssh_target_of
@@ -296,6 +298,11 @@ class DetachedConsoleWindow(QWidget):
         box = QVBoxLayout(self)
         box.setContentsMargins(0, 0, 0, 0)
         box.addWidget(client)
+        # Reparenting hides a widget - Qt is explicit that it "becomes
+        # invisible as part of changing its parent, even if it was
+        # previously visible". Without this the window opens correctly
+        # sized, still connected, and completely empty.
+        client.show()
         self.resize(1100, 720)
         from PySide6.QtGui import QKeySequence, QShortcut
 

@@ -5,6 +5,30 @@ from __future__ import annotations
 from .common import *  # noqa: F403 - shared imports for the tab modules
 
 
+def pick_display(graphics, spice_available: bool):
+    """Which of a machine's displays to connect to.
+
+    SPICE first where this build can speak it: it carries the clipboard and
+    the guest resize, and VNC carries neither. Preferring VNC - as this did
+    - meant adding a SPICE display changed nothing, and the clipboard went
+    on quietly not working with no way to tell why.
+    """
+    spice = next(
+        (g for g in graphics
+         if g.type == "spice" and (g.port > 0 or g.tls_port > 0)),
+        None,
+    )
+    vnc = next(
+        (g for g in graphics if g.type == "vnc" and (g.port > 0 or g.socket)),
+        None,
+    )
+    if spice is not None and spice_available:
+        return spice
+    # no spice-glib here, so VNC even though it can do less; a SPICE-only
+    # machine still returns its display, and the client says what is missing
+    return vnc or spice
+
+
 def dropped_files(mime) -> list[str]:
     """Local file paths out of a drag's mime data; anything else is skipped."""
     if not mime.hasUrls():
@@ -182,7 +206,9 @@ class ConsoleMixin:
 
     def _detach_console(self) -> None:
         if getattr(self, "_detached", None) is not None:
+            self._detached.showNormal()  # in case it was minimised
             self._detached.raise_()
+            self._detached.activateWindow()
             return
         client = self.console_stack.currentWidget()
         name = self._snap.name if self._snap else "console"
@@ -191,6 +217,9 @@ class ConsoleMixin:
         self._detached_client = client
 
         def reattach() -> None:
+            # No show() needed on the way back, checked rather than assumed:
+            # setCurrentWidget shows it while the stack is on screen, and
+            # switching to the tab shows it when the stack is not.
             self.console_stack.addWidget(client)
             self.console_stack.setCurrentWidget(client)
             self._detached = None
@@ -198,6 +227,11 @@ class ConsoleMixin:
 
         window.closed.connect(reattach)
         window.show()
+        # Without these the window can open behind the one it was launched
+        # from - the console is detached, and nothing appears to have
+        # happened. Compositors that prevent focus stealing do exactly that.
+        window.raise_()
+        window.activateWindow()
         client.setFocus()
 
     def _close_console(self) -> None:
@@ -269,14 +303,7 @@ class ConsoleMixin:
         def apply(graphics: list[GraphicsInfo]) -> None:
             if self.uuid != uuid or self.tabs.currentIndex() != self.TAB_CONSOLE:
                 return
-            display = next(
-                (g for g in graphics if g.type == "vnc" and (g.port > 0 or g.socket)),
-                None,
-            ) or next(
-                (g for g in graphics
-                 if g.type == "spice" and (g.port > 0 or g.tls_port > 0)),
-                None,
-            )
+            display = pick_display(graphics, SPICE_AVAILABLE)
             if display is None:
                 types = ", ".join(g.type for g in graphics) or "none"
                 self.console_hint.setText(
@@ -482,6 +509,11 @@ class ConsoleMixin:
         work = {
             "video": lambda: svc_set_video(uuid, health.best_video),
             "agent": lambda: svc_add_spice_agent_channel(uuid),
+            "spice": lambda: (
+                svc_add_display(uuid, "spice"),
+                svc_add_spice_agent_channel(uuid),
+                "SPICE display and agent channel added",
+            )[-1],
             "tablet": lambda: svc_attach_input(uuid, "tablet", "usb"),
         }
 

@@ -168,3 +168,65 @@ def test_config_changes_are_reported_for_the_history_feature(testconn, worker):
 
 def test_stopping_a_worker_that_never_ran_is_safe(worker):
     worker.stop()          # no connection, no pump thread started
+
+
+# -- what the memory graph is actually showing
+
+
+def test_guest_memory_prefers_what_the_guest_itself_reports():
+    """available - usable is the guest's own view, the number its task
+    manager agrees with."""
+    from vmmanager.core.poller import guest_memory_kb
+
+    raw = {"balloon.available": 16688620, "balloon.usable": 13674734,
+           "balloon.current": 16777216, "balloon.rss": 16859348}
+    assert guest_memory_kb(raw) == 16688620 - 13674734
+
+
+def test_without_guest_stats_it_falls_back_to_the_balloon_size():
+    """`current` is what the guest was given, not what it is using - for a
+    machine that has never been ballooned that is simply its maximum, which
+    is why the graph used to sit pinned at the top."""
+    from vmmanager.core.poller import guest_memory_kb
+
+    assert guest_memory_kb({"balloon.current": 16777216,
+                            "balloon.rss": 16859348}) == 16777216
+
+
+def test_rss_is_the_last_resort():
+    """The host footprint of the whole qemu process - it can exceed the
+    guest's own maximum, so it is only used when nothing else is there."""
+    from vmmanager.core.poller import guest_memory_kb
+
+    assert guest_memory_kb({"balloon.rss": 16859348}) == 16859348
+    assert guest_memory_kb({}) == 0
+
+
+def test_nonsense_guest_numbers_are_not_used():
+    """usable above available would give a negative reading."""
+    from vmmanager.core.poller import guest_memory_kb
+
+    raw = {"balloon.available": 100, "balloon.usable": 500,
+           "balloon.current": 4096}
+    assert guest_memory_kb(raw) == 4096
+
+
+def test_a_machine_is_only_asked_once_to_report_its_memory(testconn):
+    """A guest with no balloon driver never answers, and asking it on every
+    tick would be a wasted round trip per machine per second."""
+    from vmmanager.core.poller import PollWorker
+
+    class _Dom:
+        def __init__(self): self.asked = 0
+        def setMemoryStatsPeriod(self, period, flags=0): self.asked += 1
+
+    worker = PollWorker()
+    dom = _Dom()
+    for _ in range(5):
+        worker._enable_balloon_stats("uuid-1", dom, {"balloon.current": 1})
+    assert dom.asked == 1
+
+    # and not at all once it is reporting
+    other = _Dom()
+    worker._enable_balloon_stats("uuid-2", other, {"balloon.usable": 10})
+    assert other.asked == 0

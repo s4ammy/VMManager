@@ -101,6 +101,12 @@ class SpiceClient(QWidget):
         self._buttons_state = 0
         self._active = False
         self._clipboard_out = b""
+        # What the guest last sent us. Writing that into the host clipboard
+        # raises dataChanged, and offering it straight back to the guest
+        # would be a loop - compared by text rather than guarded by a flag,
+        # because setText does not promise to emit before it returns.
+        self._clipboard_in = ""
+        QApplication.clipboard().dataChanged.connect(self._host_clipboard_changed)
         self._mouse_mode = self.MOUSE_CLIENT
         self._captured = False  # pointer grabbed for relative mode
         self._warping = False  # ignore the move event our own warp generates
@@ -109,7 +115,11 @@ class SpiceClient(QWidget):
         self.grab = InputGrab(self)
         self.grab.changed.connect(self.grab_changed)
         self._pump = QTimer(self)
-        self._pump.setInterval(10)
+        # Nothing moves between ticks: an keystroke on its way out and a
+        # frame on its way in each wait for one, so the interval is added to
+        # the round trip twice. 4 ms costs a few hundred idle wakeups a
+        # second and takes ~16 ms off the worst case.
+        self._pump.setInterval(4)
         self._pump.timeout.connect(self._iterate)
         # debounce guest-resolution requests while a window is being dragged
         self._resize_timer = QTimer(self)
@@ -209,7 +219,12 @@ class SpiceClient(QWidget):
             Spice.Channel.connect(channel)
         elif isinstance(channel, Spice.CursorChannel):
             self._cursor_channel = channel
-            GObject.Object.connect(channel, "notify::cursor", self._on_cursor)
+            # The signals, not the `cursor` property: its SpiceCursorShape
+            # marshals wrongly through PyGObject - see _on_cursor_set - and
+            # these carry the same values as plain ints.
+            GObject.Object.connect(channel, "cursor-set", self._on_cursor_set)
+            GObject.Object.connect(channel, "cursor-hide", self._on_cursor_hide)
+            GObject.Object.connect(channel, "cursor-reset", self._on_cursor_reset)
             Spice.Channel.connect(channel)
 
     def _on_channel_destroy(self, _session, channel) -> None:
@@ -246,29 +261,43 @@ class SpiceClient(QWidget):
     def _on_mouse_mode(self, _channel, _pspec) -> None:
         self._read_mouse_mode()
 
-    def _on_cursor(self, channel, _pspec) -> None:
-        """Guest cursor shape -> real QCursor, so the pointer looks native."""
+    def _on_cursor_set(self, _channel, width, height, hot_x, hot_y, rgba) -> None:
+        """Guest cursor shape -> real QCursor, so the pointer looks native.
+
+        The values come from the signal rather than the channel's `cursor`
+        property, because SpiceCursorShape marshals wrongly through
+        PyGObject - the same trap as display_get_primary(). It reports a
+        32x32 Windows cursor as 8x9, and reading `type` as 64 bits swallows
+        the width and height that follow it. An 8x9 cursor is invisible,
+        which is what "I cannot see my mouse" turned out to be.
+        """
         if self._captured:
-            return  # captured: local pointer stays hidden
-        try:
-            shape = channel.props.cursor
-        except Exception:  # noqa: BLE001
-            return
-        if shape is None or not getattr(shape, "width", 0):
-            self.setCursor(Qt.CursorShape.BlankCursor)
+            return  # captured: the local pointer stays hidden
+        if not width or not height or not rgba:
+            self.unsetCursor()  # an arrow beats no pointer at all
             return
         try:
-            w, h = shape.width, shape.height
-            addr = int(shape.data)
-            buf = (ctypes.c_ubyte * (w * h * 4)).from_address(addr)
-            img = QImage(bytes(buf), w, h, w * 4, QImage.Format.Format_ARGB32)
+            buf = (ctypes.c_ubyte * (width * height * 4)).from_address(int(rgba))
+            # .tobytes() is a memcpy; bytes(ctypes_array) builds an int per
+            # byte first. The copy matters - spice owns that memory and
+            # frees it - but it does not have to be made a byte at a time.
+            img = QImage(
+                memoryview(buf).cast("B").tobytes(), width, height, width * 4,
+                QImage.Format.Format_ARGB32,
+            )
             from PySide6.QtGui import QCursor, QPixmap
 
-            self.setCursor(
-                QCursor(QPixmap.fromImage(img), shape.hot_spot_x, shape.hot_spot_y)
-            )
+            self.setCursor(QCursor(QPixmap.fromImage(img), hot_x, hot_y))
         except (TypeError, ValueError, OverflowError):
             self.unsetCursor()
+
+    def _on_cursor_hide(self, _channel) -> None:
+        """The guest asked for no pointer at all - a full-screen game, say."""
+        self.setCursor(Qt.CursorShape.BlankCursor)
+
+    def _on_cursor_reset(self, _channel) -> None:
+        """Back to the host's own arrow; the guest is no longer drawing one."""
+        self.unsetCursor()
 
     def _on_disconnected(self, _session) -> None:
         if self._session is None:
@@ -306,13 +335,25 @@ class SpiceClient(QWidget):
         if w <= 0 or h <= 0:
             return
         img_stride = self._image.bytesPerLine()
-        mv = self._image.bits()
+        # memoryviews on both sides: slicing one costs a pointer and a length,
+        # and the assignment is a memcpy. This used to go through
+        # bytes(ctypes_array[...]), which builds a Python int per byte first -
+        # eight million of them for a 1080p frame, 146 ms, which capped the
+        # console at about seven frames a second however fast the guest drew.
+        dst = memoryview(self._image.bits()).cast("B")
+        src = memoryview(
+            (ctypes.c_ubyte * (stride * fb_h)).from_address(addr)
+        ).cast("B")
         row_bytes = w * 4
-        src = (ctypes.c_ubyte * (stride * fb_h)).from_address(addr)
+        if x == 0 and row_bytes == stride == img_stride:
+            # a full-width block is contiguous in both: one copy, not h of them
+            s0, d0, n = y * stride, y * img_stride, h * stride
+            dst[d0 : d0 + n] = src[s0 : s0 + n]
+            return
         for row in range(h):
             s0 = (y + row) * stride + x * 4
             d0 = (y + row) * img_stride + x * 4
-            mv[d0 : d0 + row_bytes] = bytes(src[s0 : s0 + row_bytes])
+            dst[d0 : d0 + row_bytes] = src[s0 : s0 + row_bytes]
 
     def _on_invalidate(self, _channel, x, y, w, h) -> None:
         self._copy_rect(x, y, w, h)
@@ -599,6 +640,11 @@ class SpiceClient(QWidget):
         try:
             if not self._main.props.agent_connected:
                 return False
+            # The display has to be enabled before the config goes out - it
+            # is what spice-gtk does, and without it the agent takes the
+            # monitor config and does nothing with it. Verified against a
+            # live guest: with this line it moves, without it it does not.
+            self._main.update_display_enabled(0, True, True)
             self._main.update_display(0, 0, 0, width, height, True)
             self._main.send_monitor_config()
             return True
@@ -666,6 +712,22 @@ class SpiceClient(QWidget):
 
     # -- clipboard (needs spice-vdagent in the guest)
 
+    def _host_clipboard_changed(self) -> None:
+        """Copying on the host makes it available in the guest, unasked.
+
+        Every other SPICE client does this, and without it Ctrl+C here and
+        Ctrl+V in the guest quietly does nothing - the menu had to be used
+        instead, which nobody thinks to look for.
+        """
+        if self._main is None or not self._active:
+            return
+        text = QApplication.clipboard().text()
+        if not text or text == self._clipboard_in:
+            return  # empty, or the guest's own clipboard coming back round
+        if text.encode("utf-8") == self._clipboard_out:
+            return  # already offered; the guest fetches it when it pastes
+        self.send_clipboard(text)
+
     def send_clipboard(self, text: str) -> None:
         """Offer the host clipboard to the guest via the agent."""
         if self._main is None:
@@ -686,6 +748,8 @@ class SpiceClient(QWidget):
     def _on_guest_clipboard(self, _channel, selection, ctype, data, size) -> None:
         if ctype == VD_AGENT_CLIPBOARD_UTF8_TEXT and data is not None:
             try:
-                QApplication.clipboard().setText(bytes(data[:size]).decode("utf-8", "replace"))
+                text = bytes(data[:size]).decode("utf-8", "replace")
+                self._clipboard_in = text
+                QApplication.clipboard().setText(text)
             except (TypeError, ValueError):
                 pass

@@ -89,7 +89,7 @@ def svc_get_hardware(uuid: str) -> Hardware:
             )
         graphics = []
         for g in root.findall("devices/graphics"):
-            graphics.append((g.get("type", "?"), g.get("port") or g.get("listen") or "auto"))
+            graphics.append((g.get("type", "?"), display_ident(g)))
         video_el = root.find("devices/video/model")
         video = video_el.get("type", "?") if video_el is not None else "none"
         mem_kb = int(mem_el.text or 0) if mem_el is not None else 0
@@ -811,6 +811,92 @@ def svc_add_memory_device(uuid: str, size_mb: int, slots: int = 16) -> str:
 
     return _with_conn(go)
 
+
+def display_ident(g: ET.Element) -> str:
+    """How a <graphics> element is named in the hardware bay.
+
+    Its port, or the address it listens on when the port is left to
+    libvirt, or "auto". Both the reader and the remover go through this,
+    so the name a row shows is the name that takes it off - they cannot
+    drift into disagreeing about which display is which.
+    """
+    return g.get("port") or g.get("listen") or "auto"
+
+def svc_remove_display(uuid: str, gtype: str, ident: str) -> str:
+    """Remove one <graphics> element, named rather than guessed at.
+
+    A machine can have both a VNC and a SPICE display, and this app uses
+    the VNC one - so taking the right one off is how you move the console
+    onto SPICE. Removing "the first display" would be a coin toss, which
+    is why this takes the type and the identity the bay is showing.
+
+    Graphics cannot hot-plug, so this always lands on the next start; a
+    machine left with no display at all is a legitimate passthrough setup,
+    not a mistake, so it is allowed.
+    """
+
+    def go(conn):
+        dom = conn.lookupByUUIDString(uuid)
+        root = ET.fromstring(dom.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE))
+        devices = root.find("devices")
+        if devices is None:
+            raise RuntimeError("This machine has no devices at all")
+        same_type = [g for g in devices.findall("graphics")
+                     if g.get("type") == gtype]
+        if not same_type:
+            raise RuntimeError(
+                f"This machine has no {gtype} display in its definition"
+            )
+        # libvirt rewrites these attributes as it defines a machine - it drops
+        # port='-1' from an autoport display, for one - so the identity a row
+        # was drawn with does not always survive to the click. Type alone
+        # settles the case that matters, VNC against SPICE; the identity is
+        # only needed to tell two displays of the same type apart.
+        exact = [g for g in same_type if display_ident(g) == str(ident)]
+        if exact:
+            target = exact[0]
+        elif len(same_type) == 1:
+            target = same_type[0]
+        else:
+            found = ", ".join(f"'{display_ident(g)}'" for g in same_type)
+            raise RuntimeError(
+                f"This machine has {len(same_type)} {gtype} displays ({found}) "
+                f"and none of them is '{ident}' - refresh the hardware list "
+                "and try again"
+            )
+        devices.remove(target)
+        conn.defineXML(ET.tostring(root, encoding="unicode"))
+        return _APPLIED_CONFIG
+
+    return _with_conn(go)
+
+def svc_remove_video(uuid: str) -> str:
+    """Remove the emulated video adapter.
+
+    Worth having for a passthrough machine, which wants the card it was
+    given and nothing else. libvirt adds a video device back to any
+    machine that still has a display, so take the displays off first or
+    this will look like it did nothing.
+    """
+
+    def go(conn):
+        dom = conn.lookupByUUIDString(uuid)
+        root = ET.fromstring(dom.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE))
+        devices = root.find("devices")
+        video = devices.find("video") if devices is not None else None
+        if devices is None or video is None:
+            raise RuntimeError("This machine has no video adapter to remove")
+        devices.remove(video)
+        conn.defineXML(ET.tostring(root, encoding="unicode"))
+        if root.find("devices/graphics") is not None:
+            return (
+                "Removed - but this machine still has a display, and libvirt "
+                "gives a machine with a display a video adapter back. Remove "
+                "the displays too if you meant to leave it with none."
+            )
+        return _APPLIED_CONFIG
+
+    return _with_conn(go)
 
 def svc_remove_simple_device(uuid: str, tag: str) -> str:
     """Detach the first <tag> device, for the single-instance kinds."""

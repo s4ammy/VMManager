@@ -224,11 +224,13 @@ class HardwareMixin:
         "smartcard": "smartcard",
         "dimm": "memory device",
         "audio": "audio device",
+        "gfx": "display",
+        "video": "video adapter",
     }
-    # Not here on purpose: "gfx". svc_remove_simple_device takes the first
-    # element with that tag, and a machine may have two displays - removing
-    # the wrong one silently is worse than not offering it. It needs a service
-    # call that can say which.
+    # "gfx" and "video" go through svc_remove_display / svc_remove_video, which
+    # name what they are removing. svc_remove_simple_device would take the
+    # first element with the tag, and a machine may have two displays -
+    # removing the wrong one silently is worse than not offering it.
 
     def _hw_remover(self, kind: str, payload):
         """The callable that removes this row, or None if it cannot be removed.
@@ -244,6 +246,13 @@ class HardwareMixin:
             return self._remove_disk
         if kind == "nic":
             return self._remove_nic
+        if kind == "gfx":
+            if not payload:
+                return None  # a display row always carries (type, port)
+            gtype, ident = payload
+            return lambda: self._remove_display(gtype, ident)
+        if kind == "video":
+            return self._remove_video
         if kind in ("usb", "pci", "mdev"):
             return self._remove_hostdev
         if kind == "fs":
@@ -572,15 +581,27 @@ class HardwareMixin:
                     "Turn 3D " + ("off" if hw.video_accel3d else "on"),
                     lambda: self._toggle_accel3d(not hw.video_accel3d),
                 ),
+                _ghost("Remove", self._remove_video),
             )
         elif kind == "gfx":
-            gtype, port = payload
+            gtype, ident = payload
             self._panel_title(badge, f"{gtype.upper()} display")
             self._panel_row("type", gtype)
-            self._panel_row("port", str(port))
-            hint = QLabel("The Console tab connects to this display.")
+            # the identity is a port, or the address it listens on when the
+            # port is left to libvirt - so do not call it a port either way
+            numeric = str(ident).lstrip("-").isdigit()
+            self._panel_row("port" if numeric else "listens on", str(ident))
+            hint = QLabel(
+                "The Console tab connects to this display. With both a VNC "
+                "and a SPICE display it uses the VNC one, so remove that to "
+                "work over SPICE - which is what the shared clipboard needs."
+            )
+            hint.setWordWrap(True)
             hint.setObjectName("ConsoleHint")
             self.hw_panel.addWidget(hint)
+            self._panel_actions(
+                _ghost("Remove", lambda: self._remove_display(gtype, ident)),
+            )
         elif kind == "sound":
             self._panel_title(badge, f"Sound - {payload}")
             self._panel_row("model", str(payload))
@@ -1703,6 +1724,30 @@ class HardwareMixin:
         run_task(lambda: svc_get_hardware(uuid), done=apply, failed=self._show_error)
 
     # -- editors for the newer devices and fields
+
+    def _remove_display(self, gtype: str, ident: str) -> None:
+        uuid = self.uuid
+        if not uuid:
+            return
+        if not self._confirm_removal(
+            f"{gtype.upper()} display",
+            "Displays cannot be unplugged from a running machine, so this "
+            "takes effect on its next start.",
+        ):
+            return
+        self._hw_run(lambda: svc_remove_display(uuid, gtype, ident))
+
+    def _remove_video(self) -> None:
+        uuid = self.uuid
+        if not uuid:
+            return
+        if not self._confirm_removal(
+            "video adapter",
+            "A machine that still has a display gets one back from libvirt; "
+            "this is for a machine whose graphics are passed through.",
+        ):
+            return
+        self._hw_run(lambda: svc_remove_video(uuid))
 
     def _hw_run(self, fn) -> None:
         run_task(fn, done=self._hw_done, failed=self._hw_failed)

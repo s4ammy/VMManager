@@ -143,3 +143,58 @@ def test_a_healthy_machine_still_opens_and_says_so(qapp):
     assert labels == ["Close"], "nothing to fix, so nothing to press"
     assert dialog.windowTitle()
     dialog.close()
+
+
+def test_a_vnc_only_machine_is_told_why_its_clipboard_does_nothing():
+    """The dead end this closes: with no SPICE display the check reported
+    nothing at all, so the fix button stayed hidden and there was no way to
+    find out that a VNC display cannot carry a clipboard."""
+    assert "spice" in keys(health(graphics=("vnc",), video_model="virtio"))
+    what = dict((k, w) for k, w, _y in
+                health(graphics=("vnc",), video_model="virtio").problems())
+    assert "clipboard" in what["spice"].lower()
+
+
+def test_a_spice_machine_is_not_told_to_add_spice():
+    assert "spice" not in keys(health(graphics=("spice",), video_model="qxl"))
+
+
+# -- which display the console connects to
+
+
+def _gfx(gtype, port=5900, tls_port=-1, socket=""):
+    from vmmanager.core.models import GraphicsInfo
+
+    return GraphicsInfo(type=gtype, host="127.0.0.1", port=port,
+                        socket=socket, has_password=False, tls_port=tls_port)
+
+
+def test_spice_is_preferred_when_this_build_can_speak_it():
+    """Adding a SPICE display used to change nothing, because VNC was always
+    picked - so the clipboard stayed broken with no way to tell why."""
+    from vmmanager.pages.detail.console import pick_display
+
+    both = [_gfx("vnc", 5900), _gfx("spice", 5901)]
+    assert pick_display(both, spice_available=True).type == "spice"
+
+
+def test_vnc_is_used_when_there_is_no_spice_glib():
+    from vmmanager.pages.detail.console import pick_display
+
+    both = [_gfx("vnc", 5900), _gfx("spice", 5901)]
+    assert pick_display(both, spice_available=False).type == "vnc"
+
+
+def test_a_spice_only_machine_is_still_returned_without_spice_glib():
+    """Better a client that says what is missing than no console at all."""
+    from vmmanager.pages.detail.console import pick_display
+
+    assert pick_display([_gfx("spice", 5901)], spice_available=False).type == "spice"
+
+
+def test_a_display_with_no_port_is_not_connectable():
+    from vmmanager.pages.detail.console import pick_display
+
+    assert pick_display([_gfx("vnc", port=-1)], spice_available=True) is None
+    assert pick_display([_gfx("vnc", port=-1, socket="/run/x")],
+                        spice_available=True).type == "vnc"
