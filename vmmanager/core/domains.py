@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 import xml.etree.ElementTree as ET
@@ -86,8 +87,15 @@ def svc_clone(uuid: str, new_name: str) -> None:
 
     _with_conn(go)
 
-def svc_delete(uuid: str, delete_storage) -> None:
-    """delete_storage: True (all file disks), False, or an explicit path list."""
+def svc_delete(uuid: str, delete_storage) -> str:
+    """delete_storage: True (all file disks), False, or an explicit path list.
+
+    A disk that another volume is layered on is never removed, whatever was
+    asked for: a linked clone is an overlay on its template's image, and
+    deleting that image breaks every clone at once, silently, whenever they
+    next touch a block they do not hold themselves. Those disks are left
+    behind and named in the result.
+    """
 
     def go(conn):
         dom = conn.lookupByUUIDString(uuid)
@@ -110,14 +118,27 @@ def svc_delete(uuid: str, delete_storage) -> None:
             | libvirt.VIR_DOMAIN_UNDEFINE_NVRAM
         )
         dom.undefineFlags(flags)
+        from .storage import volumes_backed_by
+
+        dependents = volumes_backed_by(conn, sources)
+        kept: list[str] = []
         for path in sources:
+            if dependents.get(path):
+                kept.append(f"{path} ({len(dependents[path])} layered on it)")
+                continue
             try:
                 vol = conn.storageVolLookupByPath(path)
                 vol.delete(0)
             except libvirt.libvirtError:
                 pass
+        if kept:
+            return (
+                "Machine deleted. These disks were kept because other images "
+                "are layered on them: " + ", ".join(kept)
+            )
+        return "Machine deleted."
 
-    _with_conn(go)
+    return _with_conn(go)
 
 def svc_save_to_file(uuid: str, path: str) -> None:
     _with_conn(lambda c: c.lookupByUUIDString(uuid).save(path))
@@ -360,19 +381,37 @@ def svc_set_on_crash(uuid: str, restart: bool) -> str:
 
     return _with_conn(go)
 
+# What the scheduler names its snapshots: the prefix and a timestamp. Matching
+# on the prefix alone would also sweep up a snapshot someone took by hand and
+# happened to call "auto-before-upgrade".
+_AUTO_SNAPSHOT = re.compile(r"^(?P<prefix>.+?)\d{8}-\d{6}$")
+
+
 def svc_prune_snapshots(uuid: str, prefix: str, keep: int) -> int:
-    """Delete oldest prefix-matching snapshots beyond `keep`; returns count."""
+    """Delete oldest scheduled snapshots beyond `keep`; returns count.
+
+    Only ones this app wrote: `prefix` followed by the timestamp it stamps
+    them with. A hand-made snapshot that starts with the same word is left
+    alone.
+    """
 
     def go(conn):
         dom = conn.lookupByUUIDString(uuid)
         matching = []
         for snap in dom.listAllSnapshots():
-            if snap.getName().startswith(prefix):
+            m = _AUTO_SNAPSHOT.match(snap.getName())
+            if m and m.group("prefix") == prefix:
                 created = int(
                     ET.fromstring(snap.getXMLDesc(0)).findtext("creationTime") or 0
                 )
                 matching.append((created, snap))
-        matching.sort()
+        # Never by the whole tuple: two snapshots taken in the same second
+        # tie on the timestamp, and Python then compares the snapshot objects
+        # themselves, which libvirt does not order - it raises instead. The
+        # name breaks the tie, and since it carries the timestamp it sorts
+        # chronologically, so which one goes is decided rather than left to
+        # the order the driver happened to list them in.
+        matching.sort(key=lambda pair: (pair[0], pair[1].getName()))
         deleted = 0
         for _created, snap in matching[: max(0, len(matching) - keep)]:
             snap.delete(0)
@@ -385,9 +424,18 @@ def svc_list_domain_disks(uuid: str) -> list[DomainDisk]:
     """File-backed data disks (not cdroms) - candidates for deletion."""
 
     def go(conn):
+        from .storage import volumes_backed_by
+
         dom = conn.lookupByUUIDString(uuid)
         root = ET.fromstring(dom.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE))
         out: list[DomainDisk] = []
+        paths = [
+            s.get("file")
+            for d in root.findall("devices/disk")
+            if d.get("device") == "disk" and (s := d.find("source")) is not None
+            and s.get("file")
+        ]
+        dependents = volumes_backed_by(conn, paths)
         for d in root.findall("devices/disk"):
             if d.get("device") != "disk":
                 continue
@@ -408,6 +456,7 @@ def svc_list_domain_disks(uuid: str) -> list[DomainDisk]:
                     dev=target.get("dev", "?") if target is not None else "?",
                     path=path,
                     capacity_gb=cap,
+                    dependents=len(dependents.get(path, ())),
                 )
             )
         return out

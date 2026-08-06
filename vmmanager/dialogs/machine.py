@@ -51,6 +51,19 @@ class DeleteVmDialog(SizedDialog):
                 f"{disk.dev} · {disk.capacity_gb:.1f} GB · {disk.path}"
             )
             check.setChecked(False)
+            dependents = getattr(disk, "dependents", 0)
+            if dependents:
+                # A linked clone is an overlay on this file. Removing it
+                # breaks every one of them, quietly, the next time they read
+                # a block they do not hold themselves.
+                check.setEnabled(False)
+                check.setToolTip(
+                    f"{dependents} other disk(s) are layered on this one"
+                )
+                check.setText(
+                    check.text()
+                    + f"  — kept: {dependents} machine(s) are built on it"
+                )
             box.addWidget(check)
             self._disk_checks.append((check, disk.path))
         if not disks:

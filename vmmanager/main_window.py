@@ -652,7 +652,10 @@ class MainWindow(QMainWindow):
             paths = dialog.paths_to_delete()
             run_task(
                 lambda: svc_delete(snap.uuid, paths),
-                done=lambda _: self.worker.poke(),
+                done=lambda message: (
+                    self.machines.subtitle.setText(str(message)),
+                    self.worker.poke(),
+                ),
                 failed=lambda m: ErrorDialog(self._owner, "Delete failed", m).exec(),
             )
 

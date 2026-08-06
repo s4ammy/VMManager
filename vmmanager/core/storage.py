@@ -259,6 +259,12 @@ def svc_compact_candidates() -> list[CompactCandidate]:
                 fmt = vroot.find("target/format")
                 if fmt is None or fmt.get("type") != "qcow2":
                     continue
+                # An overlay is small because its data lives in the image
+                # below it. qemu-img convert merges the two, so "compacting"
+                # a linked clone inflates it to the full size of its
+                # template and cuts the link - the opposite of the job.
+                if vroot.findtext("backingStore/path"):
+                    continue
                 path = vol.path()
                 _t, capacity, allocation = vol.info()
                 if allocation < MIN_COMPACT_SIZE:
@@ -378,11 +384,13 @@ def svc_compact_volume(pool_name: str, vol_name: str) -> str:
                 vol.delete(0)
                 try:
                     svc_upload_volume_from_file_conn(
-                        conn, pool_name, vol_name, dst_copy, "qcow2"
+                        conn, pool_name, vol_name, dst_copy, "qcow2",
+                        replace=True,
                     )
                 except Exception:
                     svc_upload_volume_from_file_conn(
-                        conn, pool_name, vol_name, src_copy, "qcow2"
+                        conn, pool_name, vol_name, src_copy, "qcow2",
+                        replace=True,
                     )
                     raise RuntimeError(
                         "couldn't write the compacted image. The original has "
@@ -433,9 +441,13 @@ def svc_export_vm(uuid: str, dest_dir: str) -> str:
             fname = f"{dev}.{driver.get('type', 'qcow2') if driver is not None else 'qcow2'}"
             stream = conn.newStream()
             vol.download(stream, 0, 0)
-            with open(os.path.join(folder, fname), "wb") as f:
-                stream.recvAll(lambda s, data, fh: fh.write(data), f)
-            stream.finish()
+            try:
+                with open(os.path.join(folder, fname), "wb") as f:
+                    stream.recvAll(lambda s, data, fh: fh.write(data), f)
+                stream.finish()
+            except (libvirt.libvirtError, OSError):
+                stream.abort()  # or it is left open on the connection
+                raise
             manifest["disks"].append(
                 {"dev": dev, "file": fname,
                  "format": driver.get("type", "qcow2") if driver is not None else "qcow2"}
@@ -466,8 +478,11 @@ def svc_import_backup(folder: str, pool_name: str) -> str:
         except libvirt.libvirtError:
             pass
         dev_to_path = {}
+        pool = conn.storagePoolLookupByName(pool_name)
         for disk in manifest["disks"]:
-            vol_name = f"{name}-{disk['dev']}.{disk['format']}"
+            vol_name = free_volume_name(
+                pool, f"{name}-{disk['dev']}.{disk['format']}"
+            )
             path = svc_upload_volume_from_file_conn(
                 conn, pool_name, vol_name,
                 os.path.join(folder, disk["file"]), disk["format"],
@@ -492,15 +507,31 @@ def svc_import_backup(folder: str, pool_name: str) -> str:
 
     return _with_conn(go)
 
-def svc_upload_volume_from_file_conn(conn, pool_name, name, file_path, fmt):
+def svc_upload_volume_from_file_conn(conn, pool_name, name, file_path, fmt,
+                                     replace: bool = False):
+    """Stream a local file into a pool volume.
+
+    `replace` has to be asked for: this used to delete any volume of the
+    same name without a word, so importing a backup twice - or one whose
+    machine name matched an existing volume - destroyed a disk something
+    else was using.
+    """
     import os
 
     size = os.path.getsize(file_path)
     pool = conn.storagePoolLookupByName(pool_name)
     try:
-        pool.storageVolLookupByName(name).delete(0)
+        existing = pool.storageVolLookupByName(name)
     except libvirt.libvirtError:
-        pass
+        existing = None
+    if existing is not None:
+        if not replace:
+            raise RuntimeError(
+                f"'{name}' already exists in pool '{pool_name}'. Delete it "
+                "first if it is not wanted - it is not overwritten in case "
+                "another machine is using it."
+            )
+        existing.delete(0)
     vol = pool.createXML(
         f"""<volume>
   <name>{x(name)}</name>
@@ -679,8 +710,10 @@ def svc_restore_backup(folder: str, pool_name: str) -> str:
                     continue
                 dev = target.get("dev")
                 if dev in restored:
+                    pool = conn.storagePoolLookupByName(pool_name)
                     path = svc_upload_volume_from_file_conn(
-                        conn, pool_name, f"{final}-{dev}.qcow2",
+                        conn, pool_name,
+                        free_volume_name(pool, f"{final}-{dev}.qcow2"),
                         restored[dev], "qcow2",
                     )
                     src.set("file", path)
@@ -1000,6 +1033,54 @@ def svc_create_pool_ex(name: str, ptype: str, target: str, opts: dict) -> None:
 
     _with_conn(go)
 
+
+def volumes_backed_by(conn, paths) -> dict[str, list[str]]:
+    """For each path, the volumes layered on top of it.
+
+    A linked clone is a qcow2 overlay whose backing file is the template's
+    image, and that relationship lives in the *volume* XML - a domain's own
+    description says nothing about it. Deleting or rewriting a file that
+    something else is layered on breaks every one of them, so the paths
+    that destroy data ask this first.
+    """
+    wanted = {p for p in paths if p}
+    found: dict[str, list[str]] = {p: [] for p in wanted}
+    if not wanted:
+        return found
+    for pool in conn.listAllStoragePools():
+        if not pool.isActive():
+            continue
+        try:
+            volumes = pool.listAllVolumes()
+        except libvirt.libvirtError:
+            continue
+        for vol in volumes:
+            try:
+                root = ET.fromstring(vol.XMLDesc(0))
+            except (libvirt.libvirtError, ET.ParseError):
+                continue
+            parent = root.findtext("backingStore/path")
+            if parent in found and vol.path() != parent:
+                found[parent].append(vol.path())
+    return found
+
+def free_volume_name(pool, name: str) -> str:
+    """`name`, or the first `name-2`, `name-3`… that nothing owns.
+
+    Uploading over a volume that already exists destroys whatever was in
+    it, which for an import or a restore is somebody else's disk.
+    """
+    stem, dot, ext = name.rpartition(".")
+    stem = stem or name
+    ext = f"{dot}{ext}" if dot else ""
+    candidate = name
+    for n in range(2, 100):
+        try:
+            pool.storageVolLookupByName(candidate)
+        except libvirt.libvirtError:
+            return candidate
+        candidate = f"{stem}-{n}{ext}"
+    raise RuntimeError(f"every name from '{name}' on is taken in this pool")
 
 def svc_backing_index() -> BackingIndex:
     """Read every volume once, for the template/clone relationship.

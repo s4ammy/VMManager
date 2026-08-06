@@ -14,8 +14,14 @@ def svc_screenshot(uuid: str) -> bytes:
         stream = conn.newStream()
         dom.screenshot(stream, 0)
         chunks: list[bytes] = []
-        stream.recvAll(lambda s, data, opaque: chunks.append(data), None)
-        stream.finish()
+        try:
+            stream.recvAll(lambda s, data, opaque: chunks.append(data), None)
+            stream.finish()
+        except libvirt.libvirtError:
+            # Left open otherwise, and with card thumbnails on this runs
+            # every few seconds - a failing guest would leak one each time.
+            stream.abort()
+            raise
         return b"".join(chunks)
 
     return _with_conn(go)

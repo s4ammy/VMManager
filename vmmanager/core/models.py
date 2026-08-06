@@ -96,11 +96,11 @@ class NwFilterInfo:
 @dataclass(frozen=True)
 class HostdevInfo:
     kind: str  # usb | pci | mdev
-    ident: str
+    ident: str  # usb: "vvvv:pppp", pci: "0000:03:00.0", mdev: a uuid
     # Read for the options dialog; out of the comparison because callers
     # match devices on kind and ident alone.
     rom_file: str = field(default="", compare=False)
-    rom_bar: bool = field(default=True, compare=False)  # usb: "vvvv:pppp", pci: "0000:03:00.0"
+    rom_bar: bool = field(default=True, compare=False)
 
 @dataclass(frozen=True)
 class FsShareInfo:
@@ -402,3 +402,7 @@ class DomainDisk:
     dev: str
     path: str
     capacity_gb: float
+    # Volumes layered on this one - linked clones of it. Deleting a disk
+    # something else is built on breaks every one of them, so the delete
+    # dialog says so and the service refuses.
+    dependents: int = 0
