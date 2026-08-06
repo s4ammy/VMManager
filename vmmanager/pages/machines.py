@@ -239,10 +239,18 @@ class MachinesPage(QWidget):
             card.set_mode(active.get(uuid, ""))
 
     def refresh_cards(self) -> None:
-        """Re-apply the current snapshots - used when OS logos arrive."""
+        """Re-apply the current snapshots - used when OS logos arrive.
+
+        Arrives from a background download, which can outlive the cards it
+        wants to repaint: a card removed from the list, or a whole window
+        closed, leaves a live Python wrapper around a deleted C++ widget.
+        Ask before touching one, as restyle_all does for highlighters.
+        """
+        from shiboken6 import isValid
+
         for snap in self._domains:
             card = self._cards.get(snap.uuid)
-            if card is not None:
+            if card is not None and isValid(card):
                 card.update_from(snap)
 
     def _refresh_tag_filter(self, domains: list[DomainSnapshot]) -> None:

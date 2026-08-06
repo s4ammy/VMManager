@@ -116,11 +116,18 @@ class LogoDownloader(QThread):
     def __init__(self, keys: list[str]) -> None:
         super().__init__()
         self._keys = keys
+        self._stop = False
+
+    def stop(self) -> None:
+        """Give up on the rest; the window that wanted them is going away."""
+        self._stop = True
 
     def run(self) -> None:
         got = []
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
         for key in self._keys:
+            if self._stop:
+                return  # nothing to deliver to any more
             try:
                 with urllib.request.urlopen(
                     CDN.format(slug=key), timeout=20
@@ -132,7 +139,7 @@ class LogoDownloader(QThread):
                 got.append(key)
             except Exception:  # noqa: BLE001 - being offline isn't an error
                 continue
-        if got:
+        if got and not self._stop:
             self.fetched.emit(got)
 
 

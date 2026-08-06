@@ -960,6 +960,13 @@ class MainWindow(QMainWindow):
         self._logo_downloader = downloader
 
         def arrived(_keys) -> None:
+            from shiboken6 import isValid
+
+            # This lands from a download thread, which can finish after the
+            # window it belongs to has gone - the Python wrapper outlives the
+            # C++ widget, and touching it raises out of the event loop.
+            if not isValid(self.machines):
+                return
             forget_cached_pixmaps()
             self.machines.refresh_cards()
 
@@ -1278,5 +1285,8 @@ class MainWindow(QMainWindow):
             window.close()
         self.detail.shutdown()
         self.worker.stop()
+        downloader = getattr(self, "_logo_downloader", None)
+        if downloader is not None:
+            downloader.stop()  # it checks between fetches; do not block on it
         self.stats.close()
         super().closeEvent(event)
