@@ -19,26 +19,41 @@ jobs:
       - name: Install what has to come from the system
         run: |
           sudo apt-get update
-          # libvirt-python links against the libvirt on the machine, so it comes
-          # from apt rather than pip. The rest are shared libraries PySide6 wants
-          # even when it renders offscreen.
+          # libvirt-dev, not python3-libvirt: libvirt-python is a C extension
+          # and pip builds it here, which needs libvirt's headers and the
+          # libvirt.pc that pkg-config reads. The apt module cannot stand in
+          # for it - that is built for the system interpreter and installs
+          # into /usr/lib/python3/dist-packages, which the interpreter
+          # setup-python unpacks into /opt/hostedtoolcache never looks at,
+          # --system-site-packages or not. That mismatch is what left pip
+          # building libvirt-python from source with no headers to build it
+          # against.
+          #
+          # The rest are shared libraries PySide6 loads even when it renders
+          # offscreen. PyGObject is deliberately not here: without it SPICE
+          # reports itself unavailable and its tests skip, so every run also
+          # checks the app still works on a host that has no spice-glib.
           sudo apt-get install -y --no-install-recommends \
-            python3-libvirt \
+            libvirt-dev pkg-config \
             libegl1 libgl1 libxkbcommon-x11-0 libdbus-1-3 \
             libnss3 libxcomposite1 libxdamage1 libxrandr2 libxtst6
 
       - name: Install VMManager
         run: |
-          # --system-site-packages so the virtualenv can see python3-libvirt
-          python -m venv --system-site-packages .venv
+          python -m venv .venv
           .venv/bin/pip install --upgrade pip
           .venv/bin/pip install -e '.[dev]'
 
-      - name: Check libvirt-python is visible
-        run: .venv/bin/python -c "import libvirt; print(libvirt.__file__)"
+      - name: Check libvirt works without a daemon
+        # The suite talks to libvirt's in-process test driver, so this is the
+        # whole of what it needs from the host: no libvirtd, no socket.
+        run: |
+          .venv/bin/python - <<'PY'
+          import libvirt
+          conn = libvirt.open("test:///default")
+          print("libvirt", libvirt.getVersion(), "· test driver:", conn.getHostname())
+          PY
 
       - name: Run the tests
-        # No display and no libvirt daemon: the suite runs against libvirt's
-        # in-process test driver, and conftest asks Qt for the offscreen
-        # platform. Verified locally by refusing every non-test: connection.
+        # No display: conftest asks Qt for the offscreen platform.
         run: .venv/bin/python -m pytest -q
