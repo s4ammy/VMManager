@@ -9,6 +9,7 @@ import libvirt
 from .connection import _with_conn
 from .devices import _APPLIED_CONFIG
 from .models import DisplayHealth, GraphicsInfo
+from .xmlutil import _editable_xml
 
 def svc_display_health(uuid: str) -> DisplayHealth:
     """What the machine's own definition does for its graphical console."""
@@ -69,7 +70,7 @@ def svc_add_display(uuid: str, gtype: str = "vnc") -> str:
 
     def go(conn):
         dom = conn.lookupByUUIDString(uuid)
-        root = ET.fromstring(dom.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE))
+        root = _editable_xml(dom)
         devices = root.find("devices")
         if devices is None:
             raise RuntimeError("Domain has no <devices> element")

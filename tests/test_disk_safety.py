@@ -193,3 +193,38 @@ def test_pruning_only_touches_what_the_scheduler_wrote(testconn, domain):
     finally:
         for s in domain.listAllSnapshots():
             s.delete(0)
+
+
+def test_a_disk_that_will_not_delete_is_named_rather_than_ignored(monkeypatch):
+    """"Machine deleted" over the top of a failed delete leaves an image on
+    the host that the person asking believed they had just erased."""
+    import libvirt
+
+    from vmmanager.core import domains
+
+    class _Vol3:
+        def __init__(self, path): self._path = path
+        def delete(self, _flags=0):
+            raise libvirt.libvirtError("cannot unlink file: Permission denied")
+
+    class _Dom:
+        def isActive(self): return False              # noqa: N802
+        def undefineFlags(self, _f): pass             # noqa: N802
+        def XMLDesc(self, _f=0):                      # noqa: N802
+            return """<domain><devices>
+              <disk device='disk'><source file='/p/locked.qcow2'/></disk>
+            </devices></domain>"""
+
+    class _C:
+        def lookupByUUIDString(self, _u): return _Dom()        # noqa: N802
+        def storageVolLookupByPath(self, p): return _Vol3(p)   # noqa: N802
+
+    monkeypatch.setattr(domains, "_with_conn", lambda go: go(_C()))
+    monkeypatch.setattr(
+        "vmmanager.core.storage.volumes_backed_by", lambda _c, paths: {}
+    )
+    message = domains.svc_delete("uuid", True)
+
+    assert "Machine deleted" in message
+    assert "could not be deleted" in message
+    assert "/p/locked.qcow2" in message, "say which one"

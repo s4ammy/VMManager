@@ -14,6 +14,7 @@ from .devices import _APPLIED_CONFIG
 from .models import DomainDisk
 from .xmlesc import x
 from .networks import svc_create_network
+from .xmlutil import _editable_xml
 
 def svc_domain_action(uuid: str, op: str) -> None:
     def go(conn):
@@ -122,6 +123,7 @@ def svc_delete(uuid: str, delete_storage) -> str:
 
         dependents = volumes_backed_by(conn, sources)
         kept: list[str] = []
+        failed: list[str] = []
         for path in sources:
             if dependents.get(path):
                 kept.append(f"{path} ({len(dependents[path])} layered on it)")
@@ -129,14 +131,24 @@ def svc_delete(uuid: str, delete_storage) -> str:
             try:
                 vol = conn.storageVolLookupByPath(path)
                 vol.delete(0)
-            except libvirt.libvirtError:
-                pass
+            except libvirt.libvirtError as e:
+                # A disk outside any pool, one the daemon may not write, or a
+                # file already gone. Saying "Machine deleted" over the top of
+                # this leaves an image on disk that the person asking believed
+                # they had just erased.
+                failed.append(f"{path} ({e.get_error_message()})")
+        parts = ["Machine deleted."]
         if kept:
-            return (
-                "Machine deleted. These disks were kept because other images "
-                "are layered on them: " + ", ".join(kept)
+            parts.append(
+                "These disks were kept because other images are layered on "
+                "them: " + ", ".join(kept)
             )
-        return "Machine deleted."
+        if failed:
+            parts.append(
+                "These disks could not be deleted and are still on the host: "
+                + ", ".join(failed)
+            )
+        return " ".join(parts)
 
     return _with_conn(go)
 
@@ -245,7 +257,7 @@ def svc_linked_clone(uuid: str, new_name: str, network: str | None = None) -> No
         dom = conn.lookupByUUIDString(uuid)
         if dom.isActive():
             raise RuntimeError("Shut the template down before cloning from it")
-        root = ET.fromstring(dom.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE))
+        root = _editable_xml(dom)
 
         for d in root.findall("devices/disk"):
             if d.get("device") != "disk":
@@ -371,7 +383,7 @@ def svc_set_on_crash(uuid: str, restart: bool) -> str:
 
     def go(conn):
         dom = conn.lookupByUUIDString(uuid)
-        root = ET.fromstring(dom.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE))
+        root = _editable_xml(dom)
         el = root.find("on_crash")
         if el is None:
             el = ET.SubElement(root, "on_crash")

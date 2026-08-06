@@ -16,6 +16,7 @@ import libvirt
 
 from .connection import _with_conn
 from .devices import _APPLIED_CONFIG, _APPLIED_LIVE
+from .xmlutil import _editable_xml
 
 HUGEPAGE_SYSFS = Path("/sys/kernel/mm/hugepages")
 
@@ -408,7 +409,7 @@ def svc_set_cpu_pinning(uuid: str, pins: dict[int, tuple[int, ...]],
 
     def go(conn):
         dom = conn.lookupByUUIDString(uuid)
-        root = ET.fromstring(dom.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE))
+        root = _editable_xml(dom)
         existing = root.find("cputune")
         # shares and quota live in the same element and are nothing to do
         # with pinning; rebuilding it from scratch would silently drop them.
@@ -478,7 +479,7 @@ def svc_set_cpu_limits(uuid: str, shares: int = 0, cap_pct: int = 0,
 
     def go(conn):
         dom = conn.lookupByUUIDString(uuid)
-        root = ET.fromstring(dom.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE))
+        root = _editable_xml(dom)
         cputune = root.find("cputune")
         if cputune is None:
             cputune = ET.SubElement(root, "cputune")
@@ -529,7 +530,7 @@ def svc_set_hugepages(uuid: str, size_kb: int) -> str:
 
     def go(conn):
         dom = conn.lookupByUUIDString(uuid)
-        root = ET.fromstring(dom.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE))
+        root = _editable_xml(dom)
         backing = root.find("memoryBacking")
         if size_kb <= 0:
             if backing is not None:
@@ -557,7 +558,7 @@ def svc_set_iothreads(uuid: str, count: int) -> str:
 
     def go(conn):
         dom = conn.lookupByUUIDString(uuid)
-        root = ET.fromstring(dom.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE))
+        root = _editable_xml(dom)
         existing = root.find("iothreads")
         if count <= 0:
             if existing is not None:

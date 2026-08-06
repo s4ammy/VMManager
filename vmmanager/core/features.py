@@ -19,6 +19,7 @@ import libvirt
 
 from .connection import _with_conn
 from .devices import _APPLIED_CONFIG
+from .xmlutil import _editable_xml
 
 EVDEV_DIR = Path("/dev/input/by-id")
 
@@ -200,7 +201,7 @@ def svc_set_features(uuid: str, wanted: GuestFeatures,
 
     def go(conn):
         dom = conn.lookupByUUIDString(uuid)
-        root = ET.fromstring(dom.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE))
+        root = _editable_xml(dom)
         features = root.find("features")
         if features is None:
             features = ET.SubElement(root, "features")

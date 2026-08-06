@@ -1437,10 +1437,23 @@ class GuestFeaturesDialog(SizedDialog):
         self.hyperv: dict[str, QCheckBox] = {}
         hv_grid = QGridLayout()
         hv_grid.setSpacing(4)
-        for index, name in enumerate(support.hyperv):
+        # What this host advertises, plus anything the machine already has
+        # that it does not. Applying writes the whole set, so an
+        # enlightenment with no box here is one this dialog would silently
+        # strip - and a definition brought from another host is exactly
+        # where that happens.
+        unlisted = [n for n, on in sorted(features.hyperv.items())
+                    if on and n not in support.hyperv]
+        for index, name in enumerate([*support.hyperv, *unlisted]):
             note = HYPERV_NOTES.get(name, "")
             check = QCheckBox(name)
             check.setChecked(features.hyperv.get(name, False))
+            if name in unlisted:
+                note = (
+                    "This machine has it, but this host's libvirt does not "
+                    "list it as supported. Left alone unless you untick it."
+                ) + (f"\n\n{note}" if note else "")
+                check.setText(f"{name} (not advertised here)")
             if note:
                 check.setToolTip(note)
             self.hyperv[name] = check

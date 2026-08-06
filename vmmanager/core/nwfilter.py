@@ -16,6 +16,7 @@ import libvirt
 from .connection import _with_conn
 from .models import NwFilterInfo
 from .xmlesc import x
+from .xmlutil import _editable_xml
 
 def svc_list_nwfilters() -> list[NwFilterInfo]:
     def go(conn):
@@ -115,7 +116,7 @@ def svc_set_nic_filter(
     def go(conn):
         dom = conn.lookupByUUIDString(uuid)
         if dom.isActive():
-            live_root = ET.fromstring(dom.XMLDesc(0))
+            live_root = _editable_xml(dom, live=True)
             iface_xml = rewrite(live_root)
             if iface_xml is not None:
                 try:
@@ -127,7 +128,7 @@ def svc_set_nic_filter(
                     return "applied"
                 except libvirt.libvirtError:
                     pass  # fall through to the persistent config
-        proot = ET.fromstring(dom.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE))
+        proot = _editable_xml(dom)
         iface_xml = rewrite(proot)
         if iface_xml is None:
             raise RuntimeError(f"No interface with MAC {mac}")

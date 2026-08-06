@@ -10,7 +10,7 @@ import libvirt
 from .connection import _with_conn, current_uri
 from .models import DiskInfo, FsShareInfo, GraphicsDetail, Hardware, NicInfo
 from .xmlesc import x
-from .xmlutil import _SYSTEM_ITEM_TAGS, _boot_entries, _find_device_element, _hostdev_ident, _next_disk_target, _pretty_xml
+from .xmlutil import _SYSTEM_ITEM_TAGS, _boot_entries, _editable_xml, _find_device_element, _hostdev_ident, _next_disk_target, _pretty_xml
 
 def svc_get_hardware(uuid: str) -> Hardware:
     def go(conn):
@@ -405,7 +405,7 @@ def svc_set_boot_order(uuid: str, entries: list[str]) -> str:
 
     def go(conn):
         dom = conn.lookupByUUIDString(uuid)
-        root = ET.fromstring(dom.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE))
+        root = _editable_xml(dom)
         per_device = any(" " in e for e in entries)
         os_el = root.find("os")
         if os_el is None:
@@ -476,7 +476,7 @@ def svc_set_device_xml(uuid: str, kind: str, ident: str, text: str) -> str:
 
     def go(conn):
         dom = conn.lookupByUUIDString(uuid)
-        root = ET.fromstring(dom.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE))
+        root = _editable_xml(dom)
         if kind in _SYSTEM_ITEM_TAGS:
             allowed = set(_SYSTEM_ITEM_TAGS[kind])
             for child in frag:
@@ -509,7 +509,7 @@ def svc_set_device_xml(uuid: str, kind: str, ident: str, text: str) -> str:
 
 def _ensure_shared_memory(conn, dom) -> bool:
     """virtiofs needs shared memory backing; add it to the config if missing."""
-    root = ET.fromstring(dom.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE))
+    root = _editable_xml(dom)
     mb = root.find("memoryBacking")
     access = mb.find("access") if mb is not None else None
     if access is not None and access.get("mode") == "shared":
@@ -570,7 +570,7 @@ def svc_set_cpu(
 
     def go(conn):
         dom = conn.lookupByUUIDString(uuid)
-        root = ET.fromstring(dom.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE))
+        root = _editable_xml(dom)
         cpu = root.find("cpu")
         if cpu is None:
             cpu = ET.SubElement(root, "cpu")
@@ -599,18 +599,50 @@ def svc_set_cpu(
 
     return _with_conn(go)
 
+# Attributes on <model> that mean the same thing whatever the adapter is,
+# so they survive a change of model. The rest - ram, vram, vgamem - are
+# sized for the model that was there and do not carry over.
+_VIDEO_KEEP = ("heads", "primary")
+
+
 def svc_set_video(uuid: str, model: str) -> str:
+    """Change the video adapter, keeping how it was set up.
+
+    Rebuilding the element from the model name alone loses everything else
+    on it, and `heads` is the one that matters: a QXL adapter set up for
+    two monitors quietly comes back as one. Same model means keep the lot;
+    a different model keeps only what still applies to it.
+    """
+
     def go(conn):
         dom = conn.lookupByUUIDString(uuid)
-        root = ET.fromstring(dom.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE))
+        root = _editable_xml(dom)
         devices = root.find("devices")
         if devices is None:
             raise RuntimeError("Domain has no <devices> element")
-        for v in devices.findall("video"):
-            devices.remove(v)
-        if model != "none":
+        existing = devices.findall("video")
+        if model == "none":
+            for v in existing:
+                devices.remove(v)
+            conn.defineXML(ET.tostring(root, encoding="unicode"))
+            return _APPLIED_CONFIG
+        if not existing:
             video = ET.SubElement(devices, "video")
             ET.SubElement(video, "model", {"type": model})
+            conn.defineXML(ET.tostring(root, encoding="unicode"))
+            return _APPLIED_CONFIG
+
+        video = existing[0]
+        for extra in existing[1:]:
+            devices.remove(extra)
+        el = video.find("model")
+        if el is None:
+            el = ET.SubElement(video, "model")
+        if el.get("type") != model:
+            kept = {k: v for k, v in el.attrib.items() if k in _VIDEO_KEEP}
+            el.attrib.clear()
+            el.attrib.update(kept)
+        el.set("type", model)
         conn.defineXML(ET.tostring(root, encoding="unicode"))
         return _APPLIED_CONFIG
 
@@ -640,7 +672,7 @@ def svc_set_disk_cache(uuid: str, target_dev: str, cache: str) -> str:
 
     def go(conn):
         dom = conn.lookupByUUIDString(uuid)
-        root = ET.fromstring(dom.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE))
+        root = _editable_xml(dom)
         for d in root.findall("devices/disk"):
             t = d.find("target")
             if t is not None and t.get("dev") == target_dev:
@@ -703,7 +735,7 @@ def _define_with_device(conn, dom, xml: str) -> str:
     A few device types (graphics, panic, and others depending on version) can
     only be added by rewriting the persistent definition.
     """
-    root = ET.fromstring(dom.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE))
+    root = _editable_xml(dom)
     devices = root.find("devices")
     if devices is None:
         raise RuntimeError("Domain has no <devices> element")
@@ -721,7 +753,7 @@ def svc_add_watchdog(uuid: str, model: str = "itco", action: str = "reset") -> s
 
     def go(conn):
         dom = conn.lookupByUUIDString(uuid)
-        root = ET.fromstring(dom.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE))
+        root = _editable_xml(dom)
         existing = root.find("devices/watchdog")
         if existing is not None:
             existing.set("action", action)
@@ -740,7 +772,7 @@ def svc_add_watchdog(uuid: str, model: str = "itco", action: str = "reset") -> s
 def svc_set_watchdog_action(uuid: str, action: str) -> str:
     def go(conn):
         dom = conn.lookupByUUIDString(uuid)
-        root = ET.fromstring(dom.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE))
+        root = _editable_xml(dom)
         wd = root.find("devices/watchdog")
         if wd is None:
             raise RuntimeError("This machine has no watchdog")
@@ -820,7 +852,7 @@ def svc_add_audio(uuid: str, backend: str = "spice") -> str:
 
     def go(conn):
         dom = conn.lookupByUUIDString(uuid)
-        root = ET.fromstring(dom.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE))
+        root = _editable_xml(dom)
         devices = root.find("devices")
         if devices is None:
             raise RuntimeError("Domain has no <devices> element")
@@ -841,7 +873,7 @@ def svc_add_memory_device(uuid: str, size_mb: int, slots: int = 16) -> str:
 
     def go(conn):
         dom = conn.lookupByUUIDString(uuid)
-        root = ET.fromstring(dom.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE))
+        root = _editable_xml(dom)
         max_el = root.find("maxMemory")
         current_kb = int(root.findtext("memory") or 0)
         if max_el is None:
@@ -903,7 +935,7 @@ def svc_set_disk_options(uuid: str, dev: str, readonly: bool | None = None,
 
     def go(conn):
         dom = conn.lookupByUUIDString(uuid)
-        root = ET.fromstring(dom.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE))
+        root = _editable_xml(dom)
         for d in root.findall("devices/disk"):
             t = d.find("target")
             if t is None or t.get("dev") != dev:
@@ -957,7 +989,7 @@ def svc_set_graphics(uuid: str, gtype: str, ident: str, listen_type=None,
 
     def go(conn):
         dom = conn.lookupByUUIDString(uuid)
-        root = ET.fromstring(dom.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE))
+        root = _editable_xml(dom)
         same_type = [
             g for g in root.findall("devices/graphics") if g.get("type") == gtype
         ]
@@ -1020,6 +1052,11 @@ def svc_set_display_type(uuid: str, old: str, new: str) -> str:
     """
     if new not in ("spice", "vnc"):
         raise ValueError("A display is 'spice' or 'vnc'")
+    if old == new:
+        # Saving a faceplate sends every field that moved, and "the type it
+        # already is" has to mean nothing rather than collide with the
+        # duplicate check below.
+        return _APPLIED_CONFIG
 
     # Attributes and children that belong to one protocol only.
     only = {
@@ -1071,7 +1108,7 @@ def svc_set_shared_memory(uuid: str, on: bool) -> str:
 
     def go(conn):
         dom = conn.lookupByUUIDString(uuid)
-        root = ET.fromstring(dom.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE))
+        root = _editable_xml(dom)
         backing = root.find("memoryBacking")
         if on:
             if backing is None:
@@ -1181,7 +1218,7 @@ def svc_remove_display(uuid: str, gtype: str, ident: str) -> str:
 
     def go(conn):
         dom = conn.lookupByUUIDString(uuid)
-        root = ET.fromstring(dom.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE))
+        root = _editable_xml(dom)
         devices = root.find("devices")
         if devices is None:
             raise RuntimeError("This machine has no devices at all")
@@ -1225,7 +1262,7 @@ def svc_remove_video(uuid: str) -> str:
 
     def go(conn):
         dom = conn.lookupByUUIDString(uuid)
-        root = ET.fromstring(dom.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE))
+        root = _editable_xml(dom)
         devices = root.find("devices")
         video = devices.find("video") if devices is not None else None
         if devices is None or video is None:
@@ -1308,12 +1345,14 @@ def svc_set_video_accel(uuid: str, accel3d: bool) -> str:
 
     def go(conn):
         dom = conn.lookupByUUIDString(uuid)
-        root = ET.fromstring(dom.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE))
+        root = _editable_xml(dom)
         model = root.find("devices/video/model")
         if model is None:
             raise RuntimeError("This machine has no video device")
         accel = model.find("acceleration")
         if accel is None:
+            if not accel3d:
+                return _APPLIED_CONFIG  # no element already means no 3D
             accel = ET.SubElement(model, "acceleration")
         accel.set("accel3d", "yes" if accel3d else "no")
         conn.defineXML(ET.tostring(root, encoding="unicode"))
@@ -1327,7 +1366,7 @@ def svc_set_machine_type(uuid: str, machine: str) -> str:
 
     def go(conn):
         dom = conn.lookupByUUIDString(uuid)
-        root = ET.fromstring(dom.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE))
+        root = _editable_xml(dom)
         os_type = root.find("os/type")
         if os_type is None:
             raise RuntimeError("Domain has no <os><type>")
@@ -1366,18 +1405,23 @@ def svc_set_boot_menu(uuid: str, enabled: bool, timeout_ms: int = 3000) -> str:
 
     def go(conn):
         dom = conn.lookupByUUIDString(uuid)
-        root = ET.fromstring(dom.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE))
+        root = _editable_xml(dom)
         os_el = root.find("os")
         if os_el is None:
             raise RuntimeError("Domain has no <os> element")
         menu = os_el.find("bootmenu")
+        was_on = menu is not None and menu.get("enable") == "yes"
         if menu is None:
             menu = ET.SubElement(os_el, "bootmenu")
         menu.set("enable", "yes" if enabled else "no")
-        if enabled:
-            menu.set("timeout", str(timeout_ms))
-        else:
+        if not enabled:
             menu.attrib.pop("timeout", None)
+        elif not was_on and not menu.get("timeout"):
+            # Only as part of actually turning it on. A machine that already
+            # has the menu is using whatever wait it was given - the
+            # firmware's own, if it has no timeout - and that is not this
+            # call's to overwrite.
+            menu.set("timeout", str(timeout_ms))
         conn.defineXML(ET.tostring(root, encoding="unicode"))
         return _APPLIED_CONFIG
 
@@ -1396,7 +1440,7 @@ def svc_set_hostdev_options(
 
     def go(conn):
         dom = conn.lookupByUUIDString(uuid)
-        root = ET.fromstring(dom.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE))
+        root = _editable_xml(dom)
         for h in root.findall("devices/hostdev"):
             info = _hostdev_ident(h)
             if info is None or info.kind != kind or info.ident != ident:
@@ -1428,7 +1472,7 @@ def svc_set_hostdev_options(
 def svc_set_controller_model(uuid: str, ctype: str, index: int, model: str) -> str:
     def go(conn):
         dom = conn.lookupByUUIDString(uuid)
-        root = ET.fromstring(dom.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE))
+        root = _editable_xml(dom)
         for c in root.findall("devices/controller"):
             if c.get("type") == ctype and int(c.get("index", -1)) == index:
                 c.set("model", model)

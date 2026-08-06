@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import xml.etree.ElementTree as ET
 
+import libvirt
+
 from .xmlesc import x
 from .models import HostdevInfo
 
@@ -82,6 +84,20 @@ def _next_disk_target(root: ET.Element, bus: str) -> str:
 # Rows that are a property of the machine rather than a device in it, and
 # the top-level elements each one is made of. Without an entry here the XML
 # view goes looking for a <labels> device and tells you it is missing.
+# Reading a definition in order to write it back is not the same as reading
+# it to look at. libvirt leaves security-sensitive values out of XMLDesc
+# unless asked for them - the display password, chiefly - so an edit that
+# reads the plain form, changes one element and hands the whole thing to
+# defineXML deletes every secret in it on the way past. Anything that
+# redefines a domain reads through here.
+def _editable_xml(dom, live: bool = False) -> ET.Element:
+    """The definition to edit and hand back, secrets included."""
+    flags = libvirt.VIR_DOMAIN_XML_SECURE
+    if not live:
+        flags |= libvirt.VIR_DOMAIN_XML_INACTIVE
+    return ET.fromstring(dom.XMLDesc(flags))
+
+
 _SYSTEM_ITEM_TAGS = {
     "cpu": ("vcpu", "cpu"),
     "mem": ("memory", "currentMemory", "memoryBacking"),

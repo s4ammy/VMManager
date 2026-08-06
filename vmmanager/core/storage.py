@@ -13,6 +13,7 @@ from .create import svc_upload_volume_conn
 from .models import (BackingIndex, CompactCandidate, OrphanVolume, PoolInfo,
                      VolumeInfo)
 from .xmlesc import x
+from .xmlutil import _editable_xml
 
 def svc_list_pools() -> list[PoolInfo]:
     def go(conn):
@@ -757,9 +758,7 @@ def svc_move_disk(
     def go(conn):
         dom = conn.lookupByUUIDString(uuid)
         active = bool(dom.isActive())
-        root = ET.fromstring(
-            dom.XMLDesc(0 if active else libvirt.VIR_DOMAIN_XML_INACTIVE)
-        )
+        root = _editable_xml(dom, live=active)
         disk = next(
             (
                 d for d in root.findall("devices/disk")
@@ -846,7 +845,7 @@ def svc_move_disk(
             dest_path = new_vol.path()
 
         # point the persistent definition at the new volume
-        proot = ET.fromstring(dom.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE))
+        proot = _editable_xml(dom)
         for d in proot.findall("devices/disk"):
             t = d.find("target")
             s = d.find("source")
