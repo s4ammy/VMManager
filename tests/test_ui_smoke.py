@@ -92,7 +92,15 @@ ARGS = {
     "NetworkDetailsDialog": (),
     "NetworkDialog": (),
     "NewPoolDialog": (),
-    "NwFiltersDialog": (),
+    # With the message the page shows on a connection that has no filter
+    # support - real prose, so the sizing test measures a label that has to
+    # wrap rather than an empty one. This is the case CI caught.
+    "NwFiltersDialog": (
+        [],
+        "This connection has no network-filter support - the qemu system "
+        "driver does. (this function is not supported by the connection "
+        "driver: virConnectListAllNWFilters)",
+    ),
     "NicEditDialog": (NicInfo(mac="52:54:00:11:22:33", source="default",
                               model="virtio"), ["default"]),
     "OsIconDialog": ("win11", "windows", ""),

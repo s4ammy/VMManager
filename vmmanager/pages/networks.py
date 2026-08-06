@@ -208,9 +208,60 @@ class NetworksPage(QWidget):
         )
 
     def _open_filters(self) -> None:
-        from ..dialogs import NwFiltersDialog
+        """Read the filters first, then show them.
 
-        NwFiltersDialog(self).exec()
+        The dialog is handed its data like every other one here. Fetching
+        from inside the constructor meant the window sized itself before
+        the answer arrived and had to grow again when it landed.
+        """
+        from ..dialogs import NwFiltersDialog
+        from ..libvirt_service import (
+            nwfilter_template,
+            svc_define_nwfilter,
+            svc_delete_nwfilter,
+            svc_get_nwfilter_xml,
+            svc_list_nwfilters,
+        )
+
+        def show(filters, status="") -> None:
+            dialog = NwFiltersDialog(self, filters, status)
+
+            def reload(select="", note="") -> None:
+                run_task(
+                    svc_list_nwfilters,
+                    done=lambda fs: (dialog.populate(fs, select),
+                                     dialog.set_status(note)),
+                    failed=lambda m: dialog.set_status(str(m)),
+                )
+
+            dialog.new_template = nwfilter_template
+            dialog.load_requested = lambda name: run_task(
+                lambda: svc_get_nwfilter_xml(name),
+                done=dialog.show_xml,
+                failed=lambda m: dialog.set_status(str(m)),
+            )
+            dialog.save_requested = lambda xml: run_task(
+                lambda: svc_define_nwfilter(xml),
+                done=lambda name: reload(select=name, note=f"saved '{name}'"),
+                failed=lambda m: dialog.set_status(f"refused: {m}"),
+            )
+            dialog.delete_requested = lambda name: run_task(
+                lambda: svc_delete_nwfilter(name),
+                done=lambda _: (dialog.show_xml(""),
+                                reload(note=f"deleted '{name}'")),
+                failed=lambda m: dialog.set_status(str(m)),
+            )
+            dialog.exec()
+
+        run_task(
+            svc_list_nwfilters,
+            done=show,
+            failed=lambda m: show(
+                [],
+                "This connection has no network-filter support - the qemu "
+                f"system driver does. ({m})",
+            ),
+        )
 
     def _new_network(self) -> None:
         from ..core.networks import svc_create_network_ex

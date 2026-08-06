@@ -328,18 +328,25 @@ class NwFiltersDialog(SizedDialog):
 
     Filters are per-connection, not per-network, which is why they open
     from the page header rather than from a card.
+
+    Data comes in and actions go out through callbacks, like every other
+    dialog here - it used to fetch its own list in the constructor, which
+    meant its size depended on when a background call happened to land.
     """
 
-    def __init__(self, parent) -> None:
+    def __init__(self, parent, filters=None, status: str = "") -> None:
+        # filters: list[NwFilterInfo]
         super().__init__(parent)
         from PySide6.QtWidgets import QPlainTextEdit
 
-        from ..libvirt_service import nwfilter_template
         from ..syntax import XmlHighlighter
-        from ..tasks import run_task as _run
 
-        self._run = _run
-        self._template = nwfilter_template
+        # set by the caller
+        self.load_requested = None      # (name) -> None
+        self.save_requested = None      # (xml) -> None
+        self.delete_requested = None    # (name) -> None
+        self.new_template = None        # (name) -> str
+
         self.setWindowTitle("Network filters")
         self.setMinimumSize(760, 520)
         box = QVBoxLayout(self)
@@ -367,7 +374,7 @@ class NwFiltersDialog(SizedDialog):
         split.addWidget(self.editor, 1)
         box.addLayout(split, 1)
 
-        self.status = QLabel("")
+        self.status = QLabel(status)
         self.status.setObjectName("ConsoleHint")
         self.status.setWordWrap(True)
         box.addWidget(self.status)
@@ -393,81 +400,50 @@ class NwFiltersDialog(SizedDialog):
         row.addWidget(close_btn)
         box.addLayout(row)
 
-        self._reload()
+        self.populate(filters or [])
 
-    def _reload(self, select: str | None = None) -> None:
-        from ..libvirt_service import svc_list_nwfilters
-
-        def apply(filters) -> None:
-            self.filter_list.blockSignals(True)
-            self.filter_list.clear()
-            for f in filters:
-                extra = f" + {', '.join(f.refs)}" if f.refs else ""
-                self.filter_list.addItem(f.name)
-                item = self.filter_list.item(self.filter_list.count() - 1)
-                item.setToolTip(
-                    f"chain {f.chain or 'root'} · {f.rules} rule(s){extra}"
-                )
-            self.filter_list.blockSignals(False)
-            if select:
-                matches = self.filter_list.findItems(
-                    select, Qt.MatchFlag.MatchExactly
-                )
-                if matches:
-                    self.filter_list.setCurrentItem(matches[0])
-
-        def failed(message: str) -> None:
-            self.status.setText(
-                "This connection has no network-filter support - the qemu "
-                f"system driver does. ({message})"
+    def populate(self, filters, select: str = "") -> None:
+        """Fill the list; the caller reads the filters and hands them here."""
+        self.filter_list.blockSignals(True)
+        self.filter_list.clear()
+        for f in filters:
+            extra = f" + {', '.join(f.refs)}" if f.refs else ""
+            self.filter_list.addItem(f.name)
+            item = self.filter_list.item(self.filter_list.count() - 1)
+            item.setToolTip(
+                f"chain {f.chain or 'root'} · {f.rules} rule(s){extra}"
             )
+        self.filter_list.blockSignals(False)
+        if select:
+            matches = self.filter_list.findItems(
+                select, Qt.MatchFlag.MatchExactly
+            )
+            if matches:
+                self.filter_list.setCurrentItem(matches[0])
 
-        self._run(svc_list_nwfilters, done=apply, failed=failed)
+    def show_xml(self, xml: str) -> None:
+        self.editor.setPlainText(xml)
+
+    def set_status(self, text: str) -> None:
+        self.status.setText(text)
 
     def _load_filter(self, name: str) -> None:
-        if not name:
-            return
-        from ..libvirt_service import svc_get_nwfilter_xml
-
-        self._run(
-            lambda: svc_get_nwfilter_xml(name),
-            done=self.editor.setPlainText,
-            failed=self.status.setText,
-        )
+        if name and self.load_requested is not None:
+            self.load_requested(name)
 
     def _new_filter(self) -> None:
         self.filter_list.setCurrentItem(None)
-        self.editor.setPlainText(self._template("my-filter"))
+        if self.new_template is not None:
+            self.editor.setPlainText(self.new_template("my-filter"))
         self.status.setText(
             "edit the name and rules, then Save filter defines it"
         )
 
     def _save_filter(self) -> None:
-        from ..libvirt_service import svc_define_nwfilter
-
-        xml = self.editor.toPlainText()
-        self._run(
-            lambda: svc_define_nwfilter(xml),
-            done=lambda name: (
-                self.status.setText(f"saved '{name}'"),
-                self._reload(select=name),
-            ),
-            failed=lambda m: self.status.setText(f"refused: {m}"),
-        )
+        if self.save_requested is not None:
+            self.save_requested(self.editor.toPlainText())
 
     def _delete_filter(self) -> None:
         item = self.filter_list.currentItem()
-        if item is None:
-            return
-        from ..libvirt_service import svc_delete_nwfilter
-
-        name = item.text()
-        self._run(
-            lambda: svc_delete_nwfilter(name),
-            done=lambda _: (
-                self.editor.clear(),
-                self.status.setText(f"deleted '{name}'"),
-                self._reload(),
-            ),
-            failed=lambda m: self.status.setText(str(m)),
-        )
+        if item is not None and self.delete_requested is not None:
+            self.delete_requested(item.text())
