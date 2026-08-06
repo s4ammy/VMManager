@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
     QFileDialog,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -351,3 +352,126 @@ class PoolDialog(SizedDialog):
         path = QFileDialog.getExistingDirectory(self, "Choose target directory")
         if path:
             self.target.setText(path)
+
+
+class ImageToolsDialog(SizedDialog):
+    """What qemu-img says about an image, and the two things it can do to it.
+
+    Both of those things write, and both are refused by qemu-img itself if
+    the machine is running - so this says so up front rather than letting
+    someone find out by corrupting a disk.
+    """
+
+    repair_requested = Signal(str, bool)          # path, leaks only
+    convert_requested = Signal(str, str, str, bool)  # path, format, cluster, compress
+
+    def __init__(self, parent, info, check) -> None:
+        super().__init__(parent)
+        from PySide6.QtWidgets import QCheckBox
+
+        from ..core.imgtools import CLUSTER_SIZES, FORMATS
+        from ..widgets.format import fmt_size
+
+        self.setWindowTitle("Disk image")
+        self.setMinimumWidth(560)
+        self._info = info
+        box = QVBoxLayout(self)
+        box.setContentsMargins(24, 22, 24, 20)
+        box.setSpacing(10)
+        box.addWidget(_title(info.path.rsplit("/", 1)[-1]))
+
+        path = QLabel(info.path)
+        path.setWordWrap(True)
+        path.setObjectName("ConsoleHint")
+        box.addWidget(path)
+
+        facts = QGridLayout()
+        facts.setHorizontalSpacing(18)
+        facts.setVerticalSpacing(4)
+        rows = [
+            ("format", info.format or "-"),
+            ("size to the guest", fmt_size(info.virtual_size)),
+            ("size on the host", fmt_size(info.actual_size)),
+            ("cluster size", fmt_size(info.cluster_size) if info.cluster_size else "-"),
+        ]
+        if info.backing_file:
+            rows.append(("layered on", info.backing_file))
+        if info.snapshots:
+            rows.append(("internal snapshots", ", ".join(info.snapshots)))
+        if info.encrypted:
+            rows.append(("encrypted", "yes"))
+        for i, (key, value) in enumerate(rows):
+            k = QLabel(key.upper())
+            k.setProperty("class", "StatKey")
+            v = QLabel(str(value))
+            v.setWordWrap(True)
+            v.setProperty("class", "StatVal")
+            facts.addWidget(k, i, 0)
+            facts.addWidget(v, i, 1)
+        box.addLayout(facts)
+
+        verdict = QLabel(check.summary)
+        verdict.setWordWrap(True)
+        verdict.setProperty("class", "Dim" if check.ok else "Warn")
+        box.addWidget(verdict)
+        if check.allocated_pct:
+            box.addWidget(_field_label(
+                f"{check.allocated_pct:.0f}% of its clusters are in use"
+                + (f", {check.fragmented_pct:.0f}% fragmented"
+                   if check.fragmented_pct else "")
+            ))
+
+        warning = QLabel(
+            "Repairing and converting both write. Shut the machine down "
+            "first - qemu-img writing underneath a running guest corrupts "
+            "the image."
+        )
+        warning.setWordWrap(True)
+        warning.setProperty("class", "Dim")
+        box.addWidget(warning)
+
+        box.addWidget(_field_label("convert a copy to"))
+        row = QHBoxLayout()
+        self.format = QComboBox()
+        self.format.addItems([f for f in FORMATS if f != info.format] + [info.format])
+        row.addWidget(self.format)
+        self.cluster = QComboBox()
+        self.cluster.addItem("cluster size: keep", "")
+        for size in CLUSTER_SIZES:
+            self.cluster.addItem(f"cluster size: {size}", size)
+        row.addWidget(self.cluster)
+        self.compress = QCheckBox("compressed")
+        row.addWidget(self.compress)
+        row.addStretch(1)
+        box.addLayout(row)
+
+        buttons = QHBoxLayout()
+        if check.repairable:
+            repair = QPushButton(
+                "Reclaim leaked space" if not check.errors else "Repair damage"
+            )
+            repair.setProperty("class", "GhostButton")
+            repair.clicked.connect(self._repair)
+            buttons.addWidget(repair)
+        convert = QPushButton("Convert…")
+        convert.setProperty("class", "GhostButton")
+        convert.clicked.connect(self._convert)
+        buttons.addWidget(convert)
+        buttons.addStretch(1)
+        close = QPushButton("Close")
+        close.setProperty("class", "PrimaryButton")
+        close.clicked.connect(self.accept)
+        buttons.addWidget(close)
+        box.addLayout(buttons)
+        self._check = check
+
+    def _repair(self) -> None:
+        self.repair_requested.emit(self._info.path, not self._check.errors)
+        self.accept()
+
+    def _convert(self) -> None:
+        self.convert_requested.emit(
+            self._info.path, self.format.currentText(),
+            self.cluster.currentData() or "", self.compress.isChecked(),
+        )
+        self.accept()

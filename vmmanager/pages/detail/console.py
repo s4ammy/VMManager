@@ -70,6 +70,7 @@ class ConsoleMixin:
         self.spice.capture_changed.connect(self._spice_capture_changed)
         self.spice.grab_changed.connect(self._grab_changed)
         self.spice.usb_changed.connect(self._on_usb_changed)
+        self.spice.monitors_changed.connect(self._monitors_changed)
         self.console_stack = QStackedWidget()
         self.console_stack.setMinimumHeight(300)
         self.console_stack.addWidget(self.vnc)
@@ -102,6 +103,15 @@ class ConsoleMixin:
         self.console_fix.clicked.connect(self._console_fix_clicked)
         self.console_fix.hide()
         row.addWidget(self.console_fix)
+        # Only shown for a guest that actually has more than one head, so
+        # the usual single-monitor console is unchanged.
+        self.monitor_combo = QComboBox()
+        self.monitor_combo.setToolTip(
+            "Which of the guest's monitors this view is painting"
+        )
+        self.monitor_combo.currentIndexChanged.connect(self._monitor_chosen)
+        self.monitor_combo.hide()
+        row.addWidget(self.monitor_combo)
         keys_btn = QPushButton("Send key ▾")
         keys_btn.setProperty("class", "GhostButton")
         keys_btn.clicked.connect(lambda: self._keys_menu(keys_btn))
@@ -288,6 +298,25 @@ class ConsoleMixin:
             self._tunnel.stop()
             self._tunnel.deleteLater()
             self._tunnel = None
+
+    def _monitors_changed(self, monitors: list) -> None:
+        """Offer a chooser once the guest has more than one head."""
+        self.monitor_combo.blockSignals(True)
+        self.monitor_combo.clear()
+        for monitor in monitors:
+            self.monitor_combo.addItem(f"monitor {monitor + 1}", monitor)
+        current = self.spice.current_monitor()
+        index = self.monitor_combo.findData(current)
+        self.monitor_combo.setCurrentIndex(max(index, 0))
+        self.monitor_combo.blockSignals(False)
+        self.monitor_combo.setVisible(len(monitors) > 1)
+
+    def _monitor_chosen(self, index: int) -> None:
+        if index < 0:
+            return
+        monitor = self.monitor_combo.itemData(index)
+        if monitor is not None:
+            self.spice.show_monitor(int(monitor))
 
     def _keys_menu(self, anchor: QPushButton) -> None:
         if not self.uuid:

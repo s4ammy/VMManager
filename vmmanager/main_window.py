@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtWidgets import QFileDialog
 
 from .dialogs import (
+    CompareDialog,
     ChoiceDialog,
     DiffDialog,
     CloneDetailsDialog,
@@ -30,7 +31,11 @@ from .dialogs import (
     WakeScheduleDialog,
 )
 from .data.history import StatsStore
+from .core.profiles import apply_to_spec, from_json, to_json
 from .libvirt_service import (
+    svc_capture_profile,
+    svc_compare_definitions,
+    svc_compare_machines,
     DomainSnapshot,
     HostSnapshot,
     PollWorker,
@@ -75,8 +80,10 @@ from .libvirt_service import (
     svc_set_template,
     open_external,
 )
+from .pages.activity import ActivityPage
 from .pages.detail import DetailPage
 from .pages.detail.window import MachineWindow
+from .pages.host import HostPage
 from .pages.machines import MachinesPage
 from .pages.networks import NetworksPage
 from .pages.stacks import StacksPage
@@ -130,10 +137,13 @@ class MainWindow(QMainWindow):
         self.storage = StoragePage()
         self.networks = NetworksPage()
         self.settings = SettingsPage()
+        self.host_page = HostPage()
+        self.activity_page = ActivityPage()
         self.themes = ThemesPage()
         for page in (self.machines, self.detail, self.templates_page,
-                     self.stacks_page, self.storage,
-                     self.networks, self.themes, self.settings):
+                     self.stacks_page, self.host_page, self.storage,
+                     self.networks, self.activity_page, self.themes,
+                     self.settings):
             self.stack.addWidget(page)
 
         # One window per machine, keyed by uuid. See _pop_out.
@@ -245,8 +255,10 @@ class MainWindow(QMainWindow):
             "Machines": self.machines,
             "Templates": self.templates_page,
             "Stacks": self.stacks_page,
+            "Host": self.host_page,
             "Storage": self.storage,
             "Networks": self.networks,
+            "Activity": self.activity_page,
             "Themes": self.themes,
             "Settings": self.settings,
         }
@@ -262,6 +274,10 @@ class MainWindow(QMainWindow):
             self.networks.refresh()
         elif page is self.stacks_page:
             self.stacks_page.refresh()
+        elif page is self.host_page:
+            self.host_page.refresh()
+        elif page is self.activity_page:
+            self.activity_page.refresh()
         elif page is self.templates_page:
             self.templates_page.refresh()
         elif page is self.themes:
@@ -383,6 +399,8 @@ class MainWindow(QMainWindow):
         in_use = sorted({n for d in domains for n in d.networks}) or ["default"]
         self.templates_page.set_domains(domains, in_use)
         self.networks.set_domains(domains)
+        self.host_page.update_from(domains, host)
+        self.activity_page.set_machine_names(domains)
         self.detail.host = host
         self._record_state_events(domains)
         self.settings.set_event_status(self.worker.event_driven)
@@ -544,6 +562,9 @@ class MainWindow(QMainWindow):
             "Flatten into a standalone disk…", lambda: self._flatten(snap)
         )
         menu.addAction("Clone…", lambda: self._clone(snap))
+        menu.addAction(
+            "Save as hardware profile…", lambda: self._save_profile_from(uuid)
+        )
         if snap.is_template:
             menu.addAction("Deploy linked clone…", lambda: self._linked_clone(snap))
             menu.addAction(
@@ -712,6 +733,26 @@ class MainWindow(QMainWindow):
                     failed=lambda m: self.machines.show_action_error(m),
                 )
             self.machines.subtitle.setText(f"snapshotting {len(uuids)} machines…")
+        elif op == "compare":
+            if len(uuids) != 2:
+                self.machines.show_action_error(
+                    "Select exactly two machines to compare them."
+                )
+                return
+            left, right = uuids
+
+            def show(result) -> None:
+                (names, rows), diff = result
+                CompareDialog(self._owner, names, rows, diff).exec()
+
+            run_task(
+                lambda: (
+                    svc_compare_machines(left, right),
+                    svc_compare_definitions(left, right),
+                ),
+                done=show,
+                failed=lambda m: self.machines.show_action_error(m),
+            )
         elif op == "tag":
             from PySide6.QtWidgets import QInputDialog
 
@@ -1255,6 +1296,42 @@ class MainWindow(QMainWindow):
         self._open_detail(uuid)
         self.detail.tabs.setCurrentIndex(self.detail.TAB_CONSOLE)
 
+    def _saved_profiles(self) -> list:
+        """Hardware profiles, newest schema tolerated. A profile that will
+        not load is skipped rather than stopping the wizard opening."""
+        out = []
+        for name, payload, _created in self.stats.profiles():
+            try:
+                out.append(from_json(payload))
+            except Exception:  # noqa: BLE001 - one bad row is not fatal
+                log.warning("could not load the profile %r", name)
+        return out
+
+    def _save_profile_from(self, uuid: str) -> None:
+        """Capture a working machine's shape, to build the next one like it."""
+        from PySide6.QtWidgets import QInputDialog
+
+        name, ok = QInputDialog.getText(
+            self._owner, "Save as profile",
+            "A profile keeps this machine's firmware, chipset, CPU, memory, "
+            "video and guest features - and none of its storage.\n\nName:",
+        )
+        if not ok or not name.strip():
+            return
+
+        def done(profile) -> None:
+            self.stats.save_profile(profile.name, to_json(profile))
+            self.machines.subtitle.setText(
+                f"saved the profile '{profile.name}' - it is offered when you "
+                "make a new machine"
+            )
+
+        run_task(
+            lambda: svc_capture_profile(uuid, name),
+            done=done,
+            failed=lambda m: ErrorDialog(self._owner, "Could not save", m).exec(),
+        )
+
     def _new_vm(self) -> None:
         host = self._host
 
@@ -1268,9 +1345,13 @@ class MainWindow(QMainWindow):
                 host_mem_mb=host.memory_mb if host else 65536,
                 templates=[(d.name, d.uuid) for d in self._domains if d.is_template],
             )
+            dialog.set_profiles(self._saved_profiles())
             if dialog.exec() != QDialog.DialogCode.Accepted:
                 return
             spec = dialog.spec()
+            profile = dialog.chosen_profile()
+            if profile is not None:
+                spec = apply_to_spec(profile, spec)
             template = dialog.template_uuid()
             if template:
                 # a clone is an overlay on the template's image, not a new build

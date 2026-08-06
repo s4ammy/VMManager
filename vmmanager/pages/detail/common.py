@@ -58,6 +58,9 @@ from ...dialogs import (
 from ...data.history import data_extent, query_history
 from ...libvirt_service import (
     AUDIO_BACKENDS,
+    RNG_SOURCES,
+    TPM_MODELS,
+    TPM_VERSIONS,
     CONTROLLER_MODELS,
     KEY_COMBOS,
     PANIC_MODELS,
@@ -151,6 +154,11 @@ from ...libvirt_service import (
     svc_remove_simple_device,
     svc_set_boot_menu,
     svc_set_disk_options,
+    svc_add_tpm,
+    svc_tpm_available,
+    svc_set_tpm,
+    svc_add_rng,
+    svc_set_rng_source,
     svc_set_graphics,
     svc_set_display_type,
     svc_set_shared_memory,
@@ -190,7 +198,7 @@ from ...logs import log
 from ...tasks import connect_guarded, run_task
 from ...console.tunnel import SSHTunnel, is_remote_uri, ssh_target_of
 from ...console.vnc import VncClient
-from ...widgets import Led, Sparkline, flow_row, fmt_bytes, fmt_mem
+from ...widgets import CoreBars, Led, Sparkline, flow_row, fmt_bytes, fmt_mem
 
 # console send-key combos as X11 keysyms for the in-app VNC path
 _COMBO_KEYSYMS = {
@@ -225,7 +233,8 @@ _RANGES = [
 
 
 class ChartCard(QFrame):
-    def __init__(self, title: str, max_value: float | None = None) -> None:
+    def __init__(self, title: str, max_value: float | None = None,
+                 per_core: bool = False) -> None:
         super().__init__()
         self.setProperty("class", "ChartCard")
         box = QVBoxLayout(self)
@@ -238,11 +247,78 @@ class ChartCard(QFrame):
         self.value.setProperty("class", "ChartValue")
         head.addWidget(t)
         head.addStretch(1)
+        self.mode_btn = None
+        if per_core:
+            # The overall figure is the total over the vCPU count, so a
+            # machine running one thread flat out reads 8% on twelve cores.
+            # This is the switch to the view that says otherwise.
+            self.mode_btn = QPushButton("per core")
+            self.mode_btn.setProperty("class", "SwitchTab")
+            self.mode_btn.setCheckable(True)
+            self.mode_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            self.mode_btn.setToolTip(
+                "Show each vCPU on its own instead of the total across them"
+            )
+            self.mode_btn.toggled.connect(self._mode_toggled)
+            head.addWidget(self.mode_btn)
         head.addWidget(self.value)
         box.addLayout(head)
         self.spark = Sparkline(max_value=max_value)
         self.spark.setMinimumHeight(64)
         box.addWidget(self.spark, 1)
+        self.cores = None
+        if per_core:
+            self.cores = CoreBars()
+            self.cores.setMinimumHeight(64)
+            self.cores.hide()
+            box.addWidget(self.cores, 1)
+
+        # A per-device breakdown under the line, for the cards where one
+        # line is a sum: three disks drawn as one total says a machine is
+        # busy without saying which of them is doing it.
+        self.breakdown = QLabel("")
+        self.breakdown.setObjectName("ConsoleHint")
+        self.breakdown.setWordWrap(True)
+        self.breakdown.setVisible(False)
+        box.addWidget(self.breakdown)
+
+    def _mode_toggled(self, per_core: bool) -> None:
+        """Swap the line for the bars, and remember which was chosen."""
+        self.mode_btn.setText("overall" if per_core else "per core")
+        self.spark.setVisible(not per_core)
+        if self.cores is not None:
+            self.cores.setVisible(per_core)
+        from ..settings import save_cpu_per_core
+
+        save_cpu_per_core(per_core)
+
+    def showing_cores(self) -> bool:
+        return self.mode_btn is not None and self.mode_btn.isChecked()
+
+    def set_cores(self, values) -> None:
+        if self.cores is not None:
+            self.cores.set_values(values)
+
+    def set_breakdown(self, rows, unit) -> None:
+        """`rows` is (name, value) per device; `unit` formats one value.
+
+        Hidden when there is nothing to break down - one disk broken out
+        into one line is the same line twice.
+        """
+        rows = [(name, value) for name, value in rows]
+        if len(rows) < 2:
+            self.breakdown.setVisible(False)
+            return
+        busiest = max(value for _n, value in rows)
+        parts = []
+        for name, value in rows:
+            text = f"{name} {unit(value)}"
+            # The one doing the work, when one of them clearly is.
+            if value == busiest and busiest > 0 and len(rows) > 1:
+                text = f"▸ {text}"
+            parts.append(text)
+        self.breakdown.setText("   ".join(parts))
+        self.breakdown.setVisible(True)
 
 
 def _table(columns: list[str]) -> QTableWidget:

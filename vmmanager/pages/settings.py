@@ -121,6 +121,15 @@ def console_release_keys() -> str:
     return QSettings(*_SETTINGS).value("console_release_keys", "Ctrl+Alt")
 
 
+def cpu_per_core() -> bool:
+    """Whether a machine's CPU card opens on the per-vCPU view."""
+    return QSettings(*_SETTINGS).value("cpu_per_core", "false") in ("true", True)
+
+
+def save_cpu_per_core(on: bool) -> None:
+    QSettings(*_SETTINGS).setValue("cpu_per_core", "true" if on else "false")
+
+
 def console_force_xwayland() -> bool:
     """Whether to start the whole app under XWayland, for the keyboard grab.
 

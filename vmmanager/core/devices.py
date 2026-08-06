@@ -164,6 +164,10 @@ def svc_get_hardware(uuid: str) -> Hardware:
             for c in root.findall("devices/controller")
             if c.get("model")
         )
+        tpm_el = root.find("devices/tpm")
+        tpm_backend = tpm_el.find("backend") if tpm_el is not None else None
+        rng_el = root.find("devices/rng")
+        rng_backend = rng_el.find("backend") if rng_el is not None else None
         emulator = root.findtext("devices/emulator") or ""
         access = root.find("memoryBacking/access")
         return Hardware(
@@ -206,6 +210,15 @@ def svc_get_hardware(uuid: str) -> Hardware:
             audio=audio_el.get("type", "?") if audio_el is not None else "",
             memory_devices=memory_devices,
             controllers=controllers,
+            tpm=tpm_el.get("model", "tpm-crb") if tpm_el is not None else "",
+            tpm_version=(
+                tpm_backend.get("version", "2.0") if tpm_backend is not None else ""
+            ),
+            rng=(
+                (rng_backend.text or "/dev/urandom").strip()
+                if rng_backend is not None else ""
+            ),
+            rng_model=rng_el.get("model", "virtio") if rng_el is not None else "",
         )
 
     return _with_conn(go)
@@ -223,7 +236,14 @@ _APPLIED_LIVE = "Applied to the running machine and saved to its configuration."
 _APPLIED_CONFIG = "Saved to configuration - takes effect on next start."
 
 def _apply_device(dom, xml: str, action: str) -> str:
-    """attach/detach/update a device, live when the domain runs."""
+    """attach/detach/update a device, live when the domain runs.
+
+    On a machine that is not running, an attach through the device API and a
+    rewrite of the definition are the same edit - and drivers differ in
+    which device types they accept through the first. So a refused attach
+    on a stopped machine falls back to writing the definition rather than
+    reporting a device the app could perfectly well have added.
+    """
     fn = {
         "attach": dom.attachDeviceFlags,
         "detach": dom.detachDeviceFlags,
@@ -237,7 +257,12 @@ def _apply_device(dom, xml: str, action: str) -> str:
         except libvirt.libvirtError:
             fn(xml, config)
             return _APPLIED_CONFIG
-    fn(xml, config)
+    try:
+        fn(xml, config)
+    except libvirt.libvirtError:
+        if action != "attach":
+            raise
+        return _define_with_device(dom.connect(), dom, xml)
     return _APPLIED_CONFIG
 
 def _find_device(dom, xpath: str, match):
@@ -796,6 +821,146 @@ def svc_add_usb_redirection(uuid: str) -> str:
         if not _has_spice(root):
             raise RuntimeError(NEEDS_SPICE.format(what="USB redirection"))
         return _apply_device(dom, "<redirdev bus='usb' type='spicevmc'/>", "attach")
+
+    return _with_conn(go)
+
+
+# What a TPM can be. tpm-crb is what Windows 11 expects on q35; tpm-tis is
+# the older interface, and the one an i440fx machine has to use.
+TPM_MODELS = ("tpm-crb", "tpm-tis")
+TPM_VERSIONS = ("2.0", "1.2")
+
+# Where a virtio-rng gets its entropy. /dev/urandom never blocks and is what
+# you want; /dev/random can stall the guest on a host short of entropy.
+RNG_SOURCES = ("/dev/urandom", "/dev/random", "/dev/hwrng")
+
+
+def tpm_backends(conn, arch: str = "x86_64", machine: str | None = None) -> tuple[str, ...]:
+    """Which TPM backends this host can actually provide.
+
+    An emulated TPM is swtpm, a separate package libvirt starts one of per
+    machine. Without it installed libvirt advertises only 'passthrough' -
+    a real TPM chip handed to one guest - and refuses an emulated one with
+    "TPM version '2.0' is not supported", which sends people looking at the
+    version rather than at the missing package.
+    """
+    try:
+        caps = ET.fromstring(conn.getDomainCapabilities(None, arch, machine, None))
+    except libvirt.libvirtError:
+        return ()
+    tpm = caps.find("devices/tpm")
+    if tpm is None or tpm.get("supported") == "no":
+        return ()
+    return tuple(
+        v.text or "" for enum in tpm.findall("enum")
+        if enum.get("name") == "backendModel" for v in enum.findall("value")
+    )
+
+
+def svc_tpm_available() -> bool:
+    """Whether this host can give a machine an emulated TPM."""
+    return _with_conn(lambda conn: "emulator" in tpm_backends(conn))
+
+
+def svc_add_tpm(uuid: str, model: str = "tpm-crb", version: str = "2.0") -> str:
+    """An emulated TPM, which is what Windows 11 refuses to install without.
+
+    Needs swtpm on the host - libvirt starts one per machine and keeps its
+    state alongside the definition. Cannot be hot-plugged: firmware looks
+    for it at boot, so this lands on the next start.
+    """
+    if model not in TPM_MODELS:
+        raise ValueError(f"A TPM is {' or '.join(TPM_MODELS)}")
+    if version not in TPM_VERSIONS:
+        raise ValueError(f"A TPM is version {' or '.join(TPM_VERSIONS)}")
+
+    def go(conn):
+        dom = conn.lookupByUUIDString(uuid)
+        root = _editable_xml(dom)
+        if root.find("devices/tpm") is not None:
+            raise RuntimeError(
+                "This machine already has a TPM. A machine may only have one."
+            )
+        if "emulator" not in tpm_backends(conn):
+            raise RuntimeError(
+                "This host cannot emulate a TPM: libvirt is not offering an "
+                "emulated backend, which means swtpm is not installed. "
+                "Install the swtpm package and restart libvirtd, then try "
+                "again - nothing about this machine needs changing."
+            )
+        # Not through the device API at all: firmware looks for a TPM at
+        # boot, so there is no such thing as hot-plugging one.
+        return _define_with_device(
+            conn, dom,
+            f"<tpm model='{x(model)}'>"
+            f"<backend type='emulator' version='{x(version)}'/></tpm>",
+        )
+
+    return _with_conn(go)
+
+
+def svc_set_tpm(uuid: str, model: str, version: str) -> str:
+    """Change the TPM's interface or version in place."""
+    if model not in TPM_MODELS or version not in TPM_VERSIONS:
+        raise ValueError("Unknown TPM model or version")
+
+    def go(conn):
+        dom = conn.lookupByUUIDString(uuid)
+        root = _editable_xml(dom)
+        tpm = root.find("devices/tpm")
+        if tpm is None:
+            raise RuntimeError("This machine has no TPM")
+        tpm.set("model", model)
+        backend = tpm.find("backend")
+        if backend is None:
+            backend = ET.SubElement(tpm, "backend")
+        backend.set("type", "emulator")
+        backend.set("version", version)
+        conn.defineXML(ET.tostring(root, encoding="unicode"))
+        return _APPLIED_CONFIG
+
+    return _with_conn(go)
+
+
+def svc_add_rng(uuid: str, source: str = "/dev/urandom") -> str:
+    """virtio-rng: the host's entropy, handed to the guest.
+
+    A freshly installed Linux guest with nothing else running can sit for
+    a minute waiting for its random pool at first boot; this is the fix,
+    and it costs nothing.
+    """
+
+    def go(conn):
+        dom = conn.lookupByUUIDString(uuid)
+        root = _editable_xml(dom)
+        if root.find("devices/rng") is not None:
+            raise RuntimeError("This machine already has a random number source")
+        return _apply_device(
+            dom,
+            "<rng model='virtio'>"
+            f"<backend model='random'>{x(source)}</backend></rng>",
+            "attach",
+        )
+
+    return _with_conn(go)
+
+
+def svc_set_rng_source(uuid: str, source: str) -> str:
+    """Point an existing virtio-rng at a different entropy source."""
+
+    def go(conn):
+        dom = conn.lookupByUUIDString(uuid)
+        root = _editable_xml(dom)
+        rng = root.find("devices/rng")
+        if rng is None:
+            raise RuntimeError("This machine has no random number source")
+        backend = rng.find("backend")
+        if backend is None:
+            backend = ET.SubElement(rng, "backend")
+        backend.set("model", "random")
+        backend.text = source
+        conn.defineXML(ET.tostring(root, encoding="unicode"))
+        return _APPLIED_CONFIG
 
     return _with_conn(go)
 

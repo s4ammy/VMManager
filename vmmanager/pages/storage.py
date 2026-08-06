@@ -117,6 +117,10 @@ class PoolCard(QFrame):
 
         actions = QHBoxLayout()
         actions.addStretch(1)
+        inspect = QPushButton("Inspect image…")
+        inspect.setProperty("class", "GhostButton")
+        inspect.clicked.connect(lambda: page.inspect_volume(self))
+        actions.addWidget(inspect)
         resize = QPushButton("Resize selected volume")
         resize.setProperty("class", "GhostButton")
         resize.clicked.connect(lambda: page.resize_volume(self))
@@ -290,6 +294,65 @@ class StoragePage(QWidget):
             lambda: svc_create_pool_ex(name, ptype, target, options),
             done=lambda _: self.refresh(),
             failed=lambda m: ErrorDialog(self, "Create pool failed", m).exec(),
+        )
+
+    def inspect_volume(self, card) -> None:
+        """What qemu-img knows about the selected image, and what it can do.
+
+        libvirt reports capacity and allocation; everything else about an
+        image - damage, wasted space, what it is layered on, the cluster
+        size it was built with - is qemu-img's to answer.
+        """
+        name = card.selected_volume()
+        if not name:
+            self.subtitle.setText("select a volume first")
+            return
+        info_row = card.selected_volume_info()
+        path = info_row.path if info_row is not None else ""
+        if not path:
+            ErrorDialog(self, "No path", f"{name} has no file behind it.").exec()
+            return
+        from ..dialogs import ImageToolsDialog
+        from ..libvirt_service import svc_check_image, svc_image_info
+
+        self.subtitle.setText(f"reading {name}…")
+
+        def show(result) -> None:
+            info, check = result
+            self.subtitle.setText("")
+            dialog = ImageToolsDialog(self, info, check)
+            dialog.repair_requested.connect(self._repair_image)
+            dialog.convert_requested.connect(self._convert_image)
+            dialog.exec()
+
+        run_task(
+            lambda: (svc_image_info(path), svc_check_image(path)),
+            done=show,
+            failed=lambda m: (self.subtitle.setText(""),
+                              ErrorDialog(self, "Could not read the image", m).exec()),
+        )
+
+    def _repair_image(self, path: str, leaks_only: bool) -> None:
+        from ..libvirt_service import svc_repair_image
+
+        self.subtitle.setText("repairing…")
+        run_task(
+            lambda: svc_repair_image(path, leaks_only),
+            done=lambda msg: (self.subtitle.setText(str(msg)), self.refresh()),
+            failed=lambda m: (self.subtitle.setText(""),
+                              ErrorDialog(self, "Repair failed", m).exec()),
+        )
+
+    def _convert_image(self, path: str, fmt: str, cluster: str, compress: bool) -> None:
+        from ..libvirt_service import svc_convert_image
+
+        self.subtitle.setText("converting - this rewrites the whole image…")
+        run_task(
+            lambda: svc_convert_image(path, fmt, cluster_size=cluster,
+                                      compress=compress),
+            done=lambda msg: (self.subtitle.setText(str(msg)), self.refresh()),
+            failed=lambda m: (self.subtitle.setText(""),
+                              ErrorDialog(self, "Convert failed", m).exec()),
         )
 
     def _reclaim_menu(self, anchor: QPushButton) -> None:

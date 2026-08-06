@@ -23,8 +23,8 @@ from .indicators import UsageBar
 
 
 class Sidebar(QFrame):
-    NAV = ["Machines", "Templates", "Stacks", "Storage", "Networks",
-           "Themes", "Settings"]
+    NAV = ["Machines", "Templates", "Stacks", "Host", "Storage", "Networks",
+           "Activity", "Themes", "Settings"]
 
     navigate = Signal(str)
 

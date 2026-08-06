@@ -84,6 +84,8 @@ class SpiceClient(QWidget):
     capture_changed = Signal(bool)  # pointer captured for relative mode
     grab_changed = Signal(bool)  # keyboard handed to the guest
     usb_changed = Signal(str)  # a redirection settled; text is any error
+    monitors_changed = Signal(list)  # the guest's heads, as channel ids
+    monitor_changed = Signal(int)    # which one this widget is painting
 
     MOUSE_SERVER, MOUSE_CLIENT = 1, 2
 
@@ -94,6 +96,8 @@ class SpiceClient(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent)
         self._session = None
         self._display = None
+        self._displays: dict[int, object] = {}
+        self._monitor = 0
         self._inputs = None
         self._main = None
         self._cursor_channel = None
@@ -178,6 +182,8 @@ class SpiceClient(QWidget):
                     ctx.iteration(False)
         self._session = None
         self._display = None
+        self._displays = {}
+        self._monitor = 0
         self._inputs = None
         self._main = None
         self._fb = None
@@ -209,12 +215,20 @@ class SpiceClient(QWidget):
             )
             self._read_mouse_mode()
         elif isinstance(channel, Spice.DisplayChannel):
-            self._display = channel
+            # A guest with more than one head opens a display channel per
+            # monitor. Keeping only the last one meant the second monitor
+            # quietly replaced the first and neither could be chosen.
+            monitor = self._channel_id(channel)
+            self._displays[monitor] = channel
+            if self._display is None or monitor == self._monitor:
+                self._display = channel
+                self._monitor = monitor
             GObject.Object.connect(channel, "display-primary-create", self._on_primary)
             GObject.Object.connect(channel, "display-primary-destroy", self._on_primary_gone)
             GObject.Object.connect(channel, "display-invalidate", self._on_invalidate)
             GObject.Object.connect(channel, "display-mark", self._on_mark)
             Spice.Channel.connect(channel)
+            self.monitors_changed.emit(sorted(self._displays))
         elif isinstance(channel, Spice.InputsChannel):
             self._inputs = channel
             Spice.Channel.connect(channel)
@@ -228,9 +242,60 @@ class SpiceClient(QWidget):
             GObject.Object.connect(channel, "cursor-reset", self._on_cursor_reset)
             Spice.Channel.connect(channel)
 
+    @staticmethod
+    def _channel_id(channel) -> int:
+        """Which monitor this channel paints. 0 when it will not say."""
+        try:
+            return int(channel.get_property("channel-id"))
+        except Exception:  # noqa: BLE001 - older spice-glib
+            return 0
+
+    def monitors(self) -> list[int]:
+        return sorted(self._displays)
+
+    def current_monitor(self) -> int:
+        return self._monitor
+
+    def show_monitor(self, monitor: int) -> None:
+        """Paint a different head in this widget.
+
+        The channels all stay connected - switching is about which one this
+        widget draws, not about tearing anything down - so switching back
+        is instant and the guest never sees a monitor disappear.
+        """
+        channel = self._displays.get(monitor)
+        if channel is None or monitor == self._monitor:
+            return
+        self._monitor = monitor
+        self._display = channel
+        self._fb = None
+        self._image = None
+        # Ask the channel to hand its surface over again: the primary-create
+        # that would have carried it fired while another monitor was showing.
+        try:
+            channel.get_property("monitors")
+        except Exception:  # noqa: BLE001 - only a nudge
+            pass
+        self.update()
+        self.monitor_changed.emit(monitor)
+
+    def enable_monitor(self, monitor: int, on: bool) -> None:
+        """Turn a head on or off in the guest itself."""
+        if self._main is None:
+            return
+        self._main.update_display_enabled(monitor, on, True)
+        self._main.send_monitor_config()
+
     def _on_channel_destroy(self, _session, channel) -> None:
+        for monitor, existing in list(self._displays.items()):
+            if existing is channel:
+                del self._displays[monitor]
         if channel is self._display:
             self._display = None
+            remaining = sorted(self._displays)
+            if remaining:
+                self.show_monitor(remaining[0])
+            self.monitors_changed.emit(remaining)
         elif channel is self._inputs:
             self._inputs = None
         elif channel is self._main:

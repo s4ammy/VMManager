@@ -40,7 +40,11 @@ class OverviewMixin:
 
         grid = QGridLayout()
         grid.setSpacing(14)
-        self.chart_cpu = ChartCard("cpu", max_value=100.0)
+        self.chart_cpu = ChartCard("cpu", max_value=100.0, per_core=True)
+        from ..settings import cpu_per_core
+
+        if cpu_per_core():
+            self.chart_cpu.mode_btn.setChecked(True)
         self.chart_mem = ChartCard("memory")
         self.chart_disk = ChartCard("disk i/o")
         self.chart_net = ChartCard("network i/o")
@@ -106,16 +110,38 @@ class OverviewMixin:
         self.chart_mem.spark.set_values([u.mem_mb for u in hist])
         self.chart_disk.spark.set_values([u.disk_bps for u in hist])
         self.chart_net.spark.set_values([u.net_bps for u in hist])
+        self.chart_cpu.set_cores(snap.usage.vcpus)
         if snap.state == "running":
-            self.chart_cpu.value.setText(f"{snap.usage.cpu_pct:.0f}%")
+            if self.chart_cpu.showing_cores() and snap.usage.vcpus:
+                busiest = max(snap.usage.vcpus)
+                self.chart_cpu.value.setText(
+                    f"{snap.usage.cpu_pct:.0f}% · busiest core {busiest:.0f}%"
+                )
+            else:
+                self.chart_cpu.value.setText(f"{snap.usage.cpu_pct:.0f}%")
+            # Until the balloon driver inside the guest is up, the figure
+            # is the host's view of the qemu process. Saying so beats
+            # presenting an estimate as the guest's own number.
             self.chart_mem.value.setText(
                 f"{fmt_mem(snap.usage.mem_mb)} / {fmt_mem(snap.memory_mb)}"
+                + ("" if snap.usage.mem_from_guest else " ≈")
+            )
+            self.chart_mem.value.setToolTip(
+                "" if snap.usage.mem_from_guest else
+                "The host's footprint for this machine, including emulator "
+                "overhead. The guest's own figure appears once its balloon "
+                "driver is running - install the guest agent and virtio "
+                "drivers if it never does."
             )
             self.chart_disk.value.setText(f"{fmt_bytes(snap.usage.disk_bps)}/s")
             self.chart_net.value.setText(f"{fmt_bytes(snap.usage.net_bps)}/s")
+            rate = lambda v: f"{fmt_bytes(v)}/s"  # noqa: E731 - one expression
+            self.chart_disk.set_breakdown(snap.usage.disks, rate)
+            self.chart_net.set_breakdown(snap.usage.nets, rate)
         else:
             for card in (self.chart_cpu, self.chart_mem, self.chart_disk, self.chart_net):
                 card.value.setText(" - ")
+                card.set_breakdown((), str)
 
     def _update_chips(self, hw: Hardware) -> None:
         while self.chips_row.count():

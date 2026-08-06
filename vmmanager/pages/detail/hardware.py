@@ -164,6 +164,7 @@ class HardwareMixin:
         "pci": "PCI", "mdev": "MDV", "fs": "FS", "watchdog": "WDT", "redir": "URD",
         "vsock": "VSK", "panic": "PNC", "smartcard": "SCD", "audio": "AUD",
         "dimm": "DIM", "controller": "CTL", "ports": "PRT", "tune": "TUN",
+        "tpm": "TPM", "rng": "RNG",
         "features": "FEA",
     }
     def _build_hardware(self) -> QWidget:
@@ -342,6 +343,11 @@ class HardwareMixin:
             ("fs", f"{f.tag} · {f.source}", f) for f in hw.filesystems
         ])
         extras = []
+        if hw.tpm:
+            extras.append(("tpm", f"tpm {hw.tpm_version} · {hw.tpm}",
+                           (hw.tpm, hw.tpm_version)))
+        if hw.rng:
+            extras.append(("rng", f"random source · {hw.rng}", hw.rng))
         if hw.watchdog:
             model, action = hw.watchdog
             extras.append(("watchdog", f"watchdog {model} → {action}", hw.watchdog))
@@ -413,6 +419,8 @@ class HardwareMixin:
         "smartcard": "smartcard",
         "dimm": "memory device",
         "audio": "audio device",
+        "tpm": "TPM",
+        "rng": "random number source",
         "gfx": "display",
         "video": "video adapter",
     }
@@ -430,7 +438,7 @@ class HardwareMixin:
         """
         simple = {"watchdog": "watchdog", "redir": "redirdev", "vsock": "vsock",
                   "panic": "panic", "smartcard": "smartcard", "dimm": "memory",
-                  "audio": "audio"}
+                  "audio": "audio", "tpm": "tpm", "rng": "rng"}
         if kind in ("disk", "cdrom"):
             return self._remove_disk
         if kind == "nic":
@@ -1045,6 +1053,51 @@ class HardwareMixin:
             self._panel_actions(
                 _ghost("Remove", lambda: self._remove_simple("smartcard"))
             )
+        elif kind == "tpm":
+            model, version = payload
+            self._panel_title(badge, f"TPM {version}")
+            model_box = QComboBox()
+            model_box.addItems(list(TPM_MODELS))
+            model_box.setCurrentText(model)
+            version_box = QComboBox()
+            version_box.addItems(list(TPM_VERSIONS))
+            version_box.setCurrentText(version)
+
+            def save_tpm(_v) -> str:
+                return svc_set_tpm(self.uuid, model_box.currentText(),
+                                   version_box.currentText())
+
+            self._panel_field(
+                "interface", model_box, model_box.currentText, save_tpm,
+                "tpm-crb is what a q35 machine and Windows 11 expect; tpm-tis "
+                "is the older interface an i440fx machine has to use.",
+            )
+            self._panel_field(
+                "version", version_box, version_box.currentText, save_tpm,
+                "Windows 11 requires 2.0. Takes effect at the next start - "
+                "firmware looks for it at boot, so it cannot hot-plug.",
+            )
+            self._panel_save_bar()
+            self._panel_actions(
+                _ghost("Remove", lambda: self._remove_simple("tpm")),
+            )
+        elif kind == "rng":
+            self._panel_title(badge, "Random number source")
+            source = QComboBox()
+            source.setEditable(True)
+            source.addItems(list(RNG_SOURCES))
+            source.setCurrentText(str(payload))
+            self._panel_field(
+                "source", source, source.currentText,
+                lambda v: svc_set_rng_source(self.uuid, v),
+                "/dev/urandom never blocks and is what you want. /dev/random "
+                "can stall the guest when the host is short of entropy.",
+            )
+            self._panel_row("model", "virtio")
+            self._panel_save_bar()
+            self._panel_actions(
+                _ghost("Remove", lambda: self._remove_simple("rng")),
+            )
         elif kind == "audio":
             self._panel_title(badge, f"Audio output - {payload}")
             backend = QComboBox()
@@ -1619,6 +1672,16 @@ class HardwareMixin:
             other.addAction(
                 "Watchdog (reset a hung guest)",
                 lambda: self._hw_run(lambda: svc_add_watchdog(uuid)),
+            )
+        if not self._hw.tpm:
+            other.addAction(
+                "TPM 2.0 (Windows 11 requires one)",
+                lambda: self._hw_run(lambda: svc_add_tpm(uuid)),
+            )
+        if not self._hw.rng:
+            other.addAction(
+                "Random number source (virtio-rng)",
+                lambda: self._hw_run(lambda: svc_add_rng(uuid)),
             )
         other.addAction(
             "USB redirection channel (SPICE)",

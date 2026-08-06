@@ -80,6 +80,15 @@ changed, and restore it if you want it back.
   display manager and driver - shown in full before they are written.
 - **CPU isolation while a machine runs**, so the host stops scheduling its own
   work onto the cores the guest is pinned to.
+- **A host page and an activity log.** What is using the box, attributed to
+  machines over the last week - and a record of every change this app made,
+  with what came back, failures included.
+- **Compare two machines** side by side, for "why does that one work and
+  this one not".
+- **Disk image tools**: what qemu-img knows about an image, whether it is
+  damaged or just holding wasted space, and the repair or conversion for it.
+- **Hardware profiles.** Capture the shape of a machine that works - not its
+  disk - and build the next one like it.
 - **Hardware you edit in place.** Every property of a device is a field on its
   faceplate - a disk's serial and discard mode, a display's listen address,
   port and password - rather than a reading you have to go to raw XML to
@@ -99,7 +108,7 @@ the interface. [Details](INSTALL.md#what-it-needs).
 
 ## Contributing
 
-`.venv/bin/python -m pytest -q` runs 800 tests in about 12 seconds against
+`.venv/bin/python -m pytest -q` runs 940 tests in about 17 seconds against
 libvirt's fake hypervisor - no real machines involved, no display needed.
 **[DEVELOPING.md](DEVELOPING.md)** covers how the code is arranged, what the
 tests are for, and the rules they enforce.

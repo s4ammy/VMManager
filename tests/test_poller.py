@@ -180,26 +180,35 @@ def test_guest_memory_prefers_what_the_guest_itself_reports():
 
     raw = {"balloon.available": 16688620, "balloon.usable": 13674734,
            "balloon.current": 16777216, "balloon.rss": 16859348}
-    assert guest_memory_kb(raw) == 16688620 - 13674734
+    assert guest_memory_kb(raw) == (16688620 - 13674734, True)
 
 
-def test_without_guest_stats_it_falls_back_to_the_balloon_size():
-    """`current` is what the guest was given, not what it is using - for a
-    machine that has never been ballooned that is simply its maximum, which
-    is why the graph used to sit pinned at the top."""
+def test_the_balloon_size_is_never_reported_as_usage():
+    """`current` is what the guest was *given*, not what it is using, and
+    for a machine that has never been ballooned it is simply its maximum.
+    Using it meant a machine read max-of-max from the moment it started
+    until the driver inside it came up - the whole of the boot."""
     from vmmanager.core.poller import guest_memory_kb
 
-    assert guest_memory_kb({"balloon.current": 16777216,
-                            "balloon.rss": 16859348}) == 16777216
+    kb, from_guest = guest_memory_kb({"balloon.current": 16777216,
+                                      "balloon.rss": 2_100_000})
+    assert kb == 2_100_000, "the host's real footprint, not the maximum"
+    assert not from_guest
 
 
-def test_rss_is_the_last_resort():
-    """The host footprint of the whole qemu process - it can exceed the
-    guest's own maximum, so it is only used when nothing else is there."""
+def test_the_host_footprint_stands_in_until_the_guest_can_speak():
+    """rss is the qemu process's resident size: not the guest's own view,
+    and it includes emulator overhead - but it is a measurement, and during
+    a boot it tracks what the guest has actually touched."""
     from vmmanager.core.poller import guest_memory_kb
 
-    assert guest_memory_kb({"balloon.rss": 16859348}) == 16859348
-    assert guest_memory_kb({}) == 0
+    assert guest_memory_kb({"balloon.rss": 16859348}) == (16859348, False)
+
+
+def test_a_machine_with_no_figures_at_all_reports_nothing(qapp):
+    from vmmanager.core.poller import guest_memory_kb
+
+    assert guest_memory_kb({}) == (0.0, False)
 
 
 def test_nonsense_guest_numbers_are_not_used():
@@ -207,8 +216,39 @@ def test_nonsense_guest_numbers_are_not_used():
     from vmmanager.core.poller import guest_memory_kb
 
     raw = {"balloon.available": 100, "balloon.usable": 500,
-           "balloon.current": 4096}
-    assert guest_memory_kb(raw) == 4096
+           "balloon.current": 4096, "balloon.rss": 900}
+    kb, from_guest = guest_memory_kb(raw)
+    assert kb == 900 and not from_guest
+
+
+def test_a_boot_climbs_rather_than_starting_at_the_maximum(qapp):
+    """The reported symptom, as a sequence: a machine with 16 GB starts,
+    and until its balloon driver is up the graph used to read 16 of 16."""
+    from vmmanager.core.poller import PollWorker
+
+    worker = PollWorker()
+    maximum_kb = 16 * 1024 ** 2
+    booting = [
+        {"balloon.current": maximum_kb, "balloon.rss": 400_000},
+        {"balloon.current": maximum_kb, "balloon.rss": 1_200_000},
+        {"balloon.current": maximum_kb, "balloon.rss": 2_500_000},
+    ]
+    readings = [
+        worker._domain_usage("u", raw, float(i), vcpus=4).mem_mb
+        for i, raw in enumerate(booting)
+    ]
+    assert readings == sorted(readings), "it should climb as the guest boots"
+    assert all(mb < maximum_kb / 1024 for mb in readings), "never pinned at max"
+
+    # ...and hands over to the guest's own figure once the driver reports.
+    settled = worker._domain_usage(
+        "u",
+        {"balloon.current": maximum_kb, "balloon.rss": 9_000_000,
+         "balloon.available": maximum_kb, "balloon.usable": 13_000_000},
+        10.0, vcpus=4,
+    )
+    assert settled.mem_from_guest
+    assert settled.mem_mb == (maximum_kb - 13_000_000) / 1024
 
 
 def test_a_machine_is_only_asked_once_to_report_its_memory(testconn):

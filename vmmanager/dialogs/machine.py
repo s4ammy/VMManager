@@ -979,3 +979,100 @@ class StartCheckDialog(SizedDialog):
         close.clicked.connect(self.accept)
         row.addWidget(close)
         box.addLayout(row)
+
+
+class CompareDialog(SizedDialog):
+    """Two machines, lined up property by property.
+
+    The differences are what anyone opens this for, so they come first and
+    the rest is behind a tick box. The whole diff of both definitions is a
+    click away for when the summary does not have the answer.
+    """
+
+    def __init__(self, parent, names, rows, full_diff="") -> None:
+        super().__init__(parent)
+        from PySide6.QtWidgets import (
+            QCheckBox, QTableWidget, QTableWidgetItem,
+        )
+
+        left_name, right_name = names
+        self.setWindowTitle(f"{left_name} vs {right_name}")
+        self.setMinimumSize(760, 560)
+        self._rows = list(rows)
+        self._full_diff = full_diff
+
+        box = QVBoxLayout(self)
+        box.setContentsMargins(24, 22, 24, 20)
+        box.setSpacing(10)
+        box.addWidget(_title(f"{left_name}  vs  {right_name}"))
+
+        differing = [r for r in self._rows if not r.same]
+        self.summary = QLabel(
+            f"{len(differing)} of {len(self._rows)} properties differ."
+            if differing else
+            "These two are the same in everything compared here."
+        )
+        self.summary.setWordWrap(True)
+        self.summary.setProperty("class", "Dim")
+        box.addWidget(self.summary)
+
+        self.show_all = QCheckBox("Show properties that match as well")
+        self.show_all.toggled.connect(lambda _on: self._fill())
+        box.addWidget(self.show_all)
+
+        self.table = QTableWidget(0, 3)
+        self.table.setHorizontalHeaderLabels(["", left_name, right_name])
+        self.table.verticalHeader().hide()
+        self.table.setShowGrid(False)
+        self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        # The label column is as wide as its longest label; the two value
+        # columns split what is left evenly, because a comparison where one
+        # side is elided and the other is not is hard to read across.
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(0, header.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(1, header.ResizeMode.Stretch)
+        header.setSectionResizeMode(2, header.ResizeMode.Stretch)
+        box.addWidget(self.table, 1)
+        self._item = QTableWidgetItem
+        self._accent = QColor(theme.ACCENT)
+        self._faint = QColor(theme.TEXT_FAINT)
+        self._fill()
+
+        row = QHBoxLayout()
+        if full_diff:
+            whole = QPushButton("Whole definition…")
+            whole.setProperty("class", "GhostButton")
+            whole.clicked.connect(self._show_diff)
+            row.addWidget(whole)
+        row.addStretch(1)
+        close = QPushButton("Close")
+        close.setProperty("class", "PrimaryButton")
+        close.clicked.connect(self.accept)
+        row.addWidget(close)
+        box.addLayout(row)
+
+    def _fill(self) -> None:
+        rows = self._rows if self.show_all.isChecked() else [
+            r for r in self._rows if not r.same
+        ]
+        self.table.setRowCount(len(rows))
+        for i, difference in enumerate(rows):
+            for column, text in enumerate(
+                (difference.label, difference.left, difference.right)
+            ):
+                item = self._item(text)
+                item.setToolTip(text)  # the long ones are elided in place
+                if not difference.same and column:
+                    item.setForeground(self._accent)
+                elif difference.same:
+                    item.setForeground(self._faint)
+                self.table.setItem(i, column, item)
+
+    def _show_diff(self) -> None:
+        from .base import DiffDialog
+
+        DiffDialog(
+            self, "Both definitions", self._full_diff,
+            note="Everything, including the parts that are unique to each "
+                 "machine by definition - the name, the uuid, the MAC.",
+        ).exec()

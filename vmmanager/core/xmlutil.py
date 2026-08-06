@@ -114,7 +114,7 @@ _SYSTEM_ITEM_TAGS = {
 _SIMPLE_DEVICE_TAGS = {
     "watchdog": "watchdog", "vsock": "vsock", "redir": "redirdev",
     "panic": "panic", "smartcard": "smartcard", "audio": "audio",
-    "dimm": "memory",
+    "dimm": "memory", "tpm": "tpm", "rng": "rng",
 }
 
 

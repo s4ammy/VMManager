@@ -105,15 +105,17 @@ class MachinesPage(QWidget):
         self.bulk_label.setProperty("class", "StatVal")
         bulk_box.addWidget(self.bulk_label)
         bulk_box.addStretch(1)
+        self._bulk_buttons = {}
         for label, op in (
             ("Start", "start"), ("Shut down", "shutdown"),
             ("Force off", "force-off"), ("Snapshot", "snapshot"),
-            ("Tag…", "tag"),
+            ("Tag…", "tag"), ("Compare…", "compare"),
         ):
             btn = QPushButton(label)
             btn.setProperty("class", "GhostButton")
             btn.clicked.connect(lambda _=False, o=op: self._emit_bulk(o))
             bulk_box.addWidget(btn)
+            self._bulk_buttons[op] = btn
         clear = QPushButton("Clear")
         clear.setProperty("class", "GhostButton")
         clear.clicked.connect(self.clear_selection)
@@ -309,6 +311,13 @@ class MachinesPage(QWidget):
         self.bulk_bar.setVisible(n > 0)
         names = [d.name for d in self._domains if d.uuid in self._selected]
         self.bulk_label.setText(f"{n} selected · " + ", ".join(names[:4]) + ("…" if n > 4 else ""))
+        # Comparing is the one that means something for exactly two.
+        compare = self._bulk_buttons.get("compare")
+        if compare is not None:
+            compare.setEnabled(n == 2)
+            compare.setToolTip(
+                "" if n == 2 else "Select exactly two machines to compare them"
+            )
 
     def _emit_bulk(self, op: str) -> None:
         if self._selected:

@@ -10,6 +10,19 @@ class Usage:
     mem_mb: float = 0.0
     disk_bps: float = 0.0
     net_bps: float = 0.0
+    # The same two totals, broken out per device. Live only - the history
+    # store keeps the aggregates, because "which disk is busy" is a
+    # question about now and one row per device per tick is not worth the
+    # thirty days of disk it would cost to answer it about last Tuesday.
+    disks: tuple[tuple[str, float], ...] = ()
+    nets: tuple[tuple[str, float], ...] = ()
+    # False while the figure is the host's view of the qemu process rather
+    # than the guest's own - true once the balloon driver inside is up.
+    mem_from_guest: bool = False
+    # One busy percentage per vCPU. The total is not their average: a guest
+    # with one thread pinned flat out reads 100% on that core and 1/n
+    # overall, and which of those you want depends on the question.
+    vcpus: tuple[float, ...] = ()
 
 @dataclass(frozen=True)
 class DomainSnapshot:
@@ -163,7 +176,13 @@ class Hardware:
     smartcard: str = ""  # mode
     audio: str = ""  # backend type
     memory_devices: tuple[int, ...] = ()  # DIMM sizes in MiB
-    controllers: tuple[tuple[str, int, str], ...] = ()  # (type, index, model)
+    controllers: tuple[tuple[str, int, str], ...] = ()
+    # "" when absent, else the model: a TPM is what Windows 11 checks for and
+    # an RNG is what stops a fresh guest blocking on entropy.
+    tpm: str = ""
+    tpm_version: str = ""
+    rng: str = ""          # the backend, e.g. /dev/urandom
+    rng_model: str = ""  # (type, index, model)
     # What the machine is, rather than what it has. Read-only, for the
     # overview: the things you need when reporting a problem or matching a
     # definition against a host.

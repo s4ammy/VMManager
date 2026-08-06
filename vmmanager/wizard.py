@@ -189,6 +189,21 @@ class NewVmDialog(SizedDialog):
         self.import_hint.hide()
         box.addWidget(self.import_hint)
 
+        # A saved profile fills in the hardware and leaves the name, the
+        # disk and the install source alone - the three things a profile
+        # deliberately does not carry.
+        profile_row = QHBoxLayout()
+        profile_row.setSpacing(8)
+        profile_row.addWidget(_field_label("profile"))
+        self.profile = QComboBox()
+        self.profile.addItem("(none - use the defaults below)", None)
+        self.profile.currentIndexChanged.connect(self._profile_chosen)
+        profile_row.addWidget(self.profile, 1)
+        self.profile_note = QLabel("")
+        self.profile_note.setObjectName("ConsoleHint")
+        profile_row.addWidget(self.profile_note, 2)
+        box.addLayout(profile_row)
+
         res_row = QHBoxLayout()
         res_row.setSpacing(14)
         cpu_col = QVBoxLayout()
@@ -545,6 +560,36 @@ class NewVmDialog(SizedDialog):
                 self.name.setText(dialog.image.osinfo_short_id)
 
     # -- result
+
+    def set_profiles(self, profiles) -> None:
+        """Offer the saved profiles. Called before the dialog is shown."""
+        self.profile.blockSignals(True)
+        current = self.profile.currentData()
+        self.profile.clear()
+        self.profile.addItem("(none - use the defaults below)", None)
+        for profile in profiles:
+            self.profile.addItem(profile.name, profile)
+        index = self.profile.findData(current)
+        self.profile.setCurrentIndex(max(index, 0))
+        self.profile.blockSignals(False)
+
+    def _profile_chosen(self, _index: int) -> None:
+        profile = self.profile.currentData()
+        if profile is None:
+            self.profile_note.setText("")
+            return
+        self.profile_note.setText(profile.summary())
+        self.vcpus.setValue(min(profile.vcpus, self.vcpus.maximum()))
+        self.memory.setValue(min(profile.memory_mb, self.memory.maximum()))
+        if self.firmware.findText(profile.firmware) >= 0:
+            self.firmware.setCurrentText(profile.firmware)
+        # Only tick the TPM if this host can actually provide one; a
+        # profile made on a machine with swtpm should not silently produce
+        # a definition that will not start here.
+        self.tpm.setChecked(bool(profile.tpm) and self._swtpm_available)
+
+    def chosen_profile(self):
+        return self.profile.currentData()
 
     def spec(self) -> CreateSpec:
         variant = self.selected_variant()

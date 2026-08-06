@@ -20,6 +20,8 @@ import vmmanager.dialogs as dialogs
 
 PROJECT = Path(__file__).resolve().parent.parent
 from vmmanager.core.hooks import GpuHandoff, HookState
+from vmmanager.core.compare import Difference
+from vmmanager.core.imgtools import CheckResult, ImageInfo
 from vmmanager.core.startcheck import StartProblem
 from vmmanager.core.models import (
     DiskInfo,
@@ -62,6 +64,18 @@ ARGS = {
     "AttachDiskDialog": ([POOL],),
     "AttachNicDialog": (["default"],),
     "CatalogDialog": ([POOL],),
+    "ImageToolsDialog": (
+        ImageInfo(path="/pool/disk.qcow2", format="qcow2",
+                  virtual_size=20 * 1024 ** 3, actual_size=4 * 1024 ** 3,
+                  cluster_size=65536, backing_file="/pool/base.qcow2"),
+        CheckResult(ok=False, summary="12 leaked cluster(s).", leaks=12,
+                    allocated_pct=41.0, repairable=True),
+    ),
+    "CompareDialog": (
+        ("web-01", "web-02"),
+        [Difference("vcpus", "2", "4"), Difference("machine", "q35", "q35")],
+        "--- web-01\n+++ web-02\n@@ -1,1 +1,1 @@\n-  <vcpu>2</vcpu>\n+  <vcpu>4</vcpu>",
+    ),
     "ChoiceDialog": ("Pick", "value", ["a", "b"]),
     "CloneDetailsDialog": ("base", [DISK]),
     "CloneDialog": ("base",),

@@ -97,8 +97,29 @@ broken and the graphical console tells you nothing.
 
 **SSH** - a real ssh terminal to the machine's address, next to the console.
 
+**Per-core CPU**, as a toggle on the CPU card. The overall figure is the
+guest's total divided by its vCPU count, so a machine running one thread flat
+out reads 8% on twelve cores and looks idle; the per-core view shows which
+cores are working, with anything at 90% or above picked out. The choice is
+remembered for the next machine you open.
+
+**Memory that does not start at the maximum.** A machine used to read its
+full size from the moment it started until the balloon driver inside the
+guest came up - the whole of the boot - because libvirt's `balloon.current`
+is what the guest has been *given*, not what it is using. Until the guest can
+speak for itself the graph now shows the host's footprint for that machine,
+marked with a ≈ so it is not mistaken for the guest's own figure.
+
+**Per-disk and per-interface breakdown** under the disk and network graphs,
+so a machine with three disks says which one is busy rather than only that
+it is. Live figures; the recorded history stays as totals.
+
 **Overview** - live CPU, memory, disk and network graphs. Figures are kept for
 30 days, so you can scrub back through the last few minutes or the last week.
+
+**More than one monitor.** A guest with several heads opens a display
+channel per monitor; the console offers a chooser and paints whichever you
+pick, with all of them left connected so switching back is instant.
 
 **XML** - edit the machine's definition directly, with highlighting, and it is
 checked before it is saved. Saving first shows a **diff of what actually
@@ -162,6 +183,13 @@ you turn that off in Settings, and nothing on disk is deleted.
   boots from nothing, and it looks like a broken disk rather than a setting.
 - **Shared memory** as a checkbox on the memory faceplate, which is what
   virtiofs and Looking Glass both need.
+- **A TPM 2.0**, added to a machine that was made without one. Windows 11
+  refuses to install without it, and until now it could only be asked for
+  when the machine was created - so an existing guest could never be
+  upgraded from here. A host with no swtpm is told that is what is missing,
+  rather than shown libvirt's "TPM version '2.0' is not supported".
+- **virtio-rng**, so a freshly installed Linux guest stops sitting at first
+  boot waiting for its random pool.
 - **A network card's link** can be pulled and put back - the software
   equivalent of unplugging the cable, with the card left on the machine.
 - **A passed-through card's video BIOS** is a field on the device, with the
@@ -315,6 +343,15 @@ hardcoded.
 
 ## Making machines
 
+**Hardware profiles.** A template is a disk to clone; a profile is the other
+half - firmware, chipset, CPU model, memory, video, TPM and guest features,
+with no storage in it at all. That is the part people rebuild by hand and get
+subtly wrong on the third machine. Capture one from a machine that already
+works (*⋯ → Save as hardware profile*) and pick it in the wizard, where it
+fills in the hardware and leaves the name, the disk and the install source
+alone. A profile made on a host with swtpm will not silently tick TPM on one
+without it.
+
 **New machine** installs from an ISO, from a network install tree by URL,
 imports a disk image you already have, or starts empty.
 
@@ -376,6 +413,26 @@ first disk of a multi-disk appliance is imported, and the wizard says so.
 - **Disk compaction** rewrites qcow2 images without the space they no longer
   need, streaming through libvirt so root-owned pools work.
 
+## Seeing what happened
+
+**A host page.** The sidebar has always carried four lines about the host,
+which answers "is the box busy" and not "busy with what". The page answers
+the second: the host's own CPU and memory over any range, and underneath it
+every machine's share of them, busiest first. The attribution comes out of
+the history already being recorded, so it covers the last week and not just
+this moment.
+
+**An activity log.** libvirt's events say a machine stopped; this says who
+stopped it. Every change the app makes is recorded with what came back -
+including the failures, which are one tick box away because they are the
+reason anyone opens it. Reads are not recorded. Kept for 90 days.
+
+**Compare two machines.** Select two on the machine list and compare them:
+their firmware, chipset, CPU, memory, disks and buses, cache modes,
+displays, passed-through devices and the rest, lined up side by side with
+the differences first. The whole diff of both definitions is a click away
+for when the summary does not have the answer.
+
 ## Storage and networks
 
 **Move a disk to another pool** from its faceplate on the Hardware tab. A
@@ -383,6 +440,17 @@ running machine's disk is mirrored onto the new volume with blockCopy and
 pivoted over - no downtime; a stopped one is cloned through the storage API.
 The old volume is deleted only if asked, and never while another machine
 still refers to it.
+
+**Disk image tools.** libvirt reports a volume's capacity and allocation and
+stops there; everything else is qemu-img's to answer and used to need a
+terminal. *Inspect image…* on a pool's volume list gives the format, what it
+costs against what it claims, its cluster size, what it is layered on, and
+`qemu-img check`'s verdict - with leaked clusters described as the wasted
+space they are rather than as damage. From there it can reclaim that space,
+repair a damaged image, or convert one to another format or cluster size.
+Converting always writes a new file beside the original, so a failure
+halfway through costs disk space rather than the disk. Root-owned images ask
+for a password only once qemu-img has actually been refused.
 
 **Storage pools** of every type libvirt supports: plain directories, NFS,
 filesystems, LVM, disks, iSCSI, SCSI, multipath, Ceph/RBD, Gluster and ZFS.

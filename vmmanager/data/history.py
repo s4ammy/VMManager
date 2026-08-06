@@ -15,6 +15,7 @@ from pathlib import Path
 DB_DIR = Path.home() / ".local" / "share" / "vmmanager"
 DB_PATH = DB_DIR / "stats.db"
 RETENTION_DAYS = 30
+ACTIVITY_KEEP_DAYS = 90  # the log of what this app did, kept longer than stats
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS samples (
@@ -72,6 +73,19 @@ CREATE TABLE IF NOT EXISTS stacks (
     network  TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS activity (
+    ts     INTEGER NOT NULL,
+    uuid   TEXT    NOT NULL DEFAULT '',
+    action TEXT    NOT NULL,
+    detail TEXT    NOT NULL DEFAULT '',
+    ok     INTEGER NOT NULL DEFAULT 1
+);
+CREATE INDEX IF NOT EXISTS idx_activity ON activity (ts);
+CREATE TABLE IF NOT EXISTS profiles (
+    name    TEXT PRIMARY KEY,
+    spec    TEXT NOT NULL,
+    created INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS usb_rules (
     uuid  TEXT NOT NULL,
     ident TEXT NOT NULL,
@@ -154,6 +168,10 @@ class StatsStore:
             self._last_prune = time.monotonic()
             cutoff = now - RETENTION_DAYS * 86400
             self._db.execute("DELETE FROM samples WHERE ts < ?", (cutoff,))
+            self._db.execute(
+                "DELETE FROM activity WHERE ts < ?",
+                (now - ACTIVITY_KEEP_DAYS * 86400,),
+            )
             self._db.commit()
 
     def record_xml(self, uuid: str, xml: str) -> None:
@@ -264,6 +282,39 @@ class StatsStore:
         self._db.execute(
             "INSERT INTO events (uuid, ts, kind, detail) VALUES (?,?,?,?)",
             (uuid, int(time.time()), kind, detail),
+        )
+        self._db.commit()
+
+    # -- hardware profiles
+
+    @_when_open(list)
+    def profiles(self) -> list[tuple[str, str, int]]:
+        return list(self._db.execute(
+            "SELECT name, spec, created FROM profiles ORDER BY name"
+        ))
+
+    @_when_open(None)
+    def save_profile(self, name: str, spec: str) -> None:
+        self._db.execute(
+            "INSERT INTO profiles (name, spec, created) VALUES (?,?,?)"
+            " ON CONFLICT(name) DO UPDATE SET spec = excluded.spec",
+            (name, spec, int(time.time())),
+        )
+        self._db.commit()
+
+    @_when_open(None)
+    def delete_profile(self, name: str) -> None:
+        self._db.execute("DELETE FROM profiles WHERE name = ?", (name,))
+        self._db.commit()
+
+    # -- what this app did
+
+    @_when_open(None)
+    def record_activity(self, action: str, uuid: str = "", detail: str = "",
+                        ok: bool = True) -> None:
+        self._db.execute(
+            "INSERT INTO activity (ts, uuid, action, detail, ok) VALUES (?,?,?,?,?)",
+            (int(time.time()), uuid, action, detail, 1 if ok else 0),
         )
         self._db.commit()
 
@@ -408,6 +459,33 @@ def _read_only_connection():
     return sqlite3.connect(DB_PATH)
 
 
+def record_activity(action: str, uuid: str = "", detail: str = "",
+                    ok: bool = True) -> None:
+    """Append one line to the activity log, from wherever it happened.
+
+    Its own short-lived connection rather than the poller's store: service
+    calls come off the task pool, the scheduler daemon has no store at all,
+    and neither should have to know who owns the file. WAL makes the
+    concurrent write a non-event.
+    """
+    DB_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        db = sqlite3.connect(DB_PATH, timeout=2.0)
+    except sqlite3.Error:
+        return
+    try:
+        db.executescript(_SCHEMA)
+        db.execute(
+            "INSERT INTO activity (ts, uuid, action, detail, ok) VALUES (?,?,?,?,?)",
+            (int(time.time()), uuid, action, detail, 1 if ok else 0),
+        )
+        db.commit()
+    except sqlite3.Error:
+        pass
+    finally:
+        db.close()
+
+
 def query_events(uuid: str, limit: int = 300) -> list[tuple[int, str, str]]:
     """(ts, kind, detail) newest first, own connection for the task pool."""
     db = _read_only_connection()
@@ -419,6 +497,35 @@ def query_events(uuid: str, limit: int = 300) -> list[tuple[int, str, str]]:
             " ORDER BY ts DESC LIMIT ?",
             (uuid, limit),
         ).fetchall()
+    finally:
+        db.close()
+
+
+def query_activity(limit: int = 500, uuid: str = "",
+                   failures_only: bool = False) -> list[tuple[int, str, str, str, int]]:
+    """(ts, uuid, action, detail, ok) newest first.
+
+    Its own connection, because the UI reads this from the task pool while
+    the poller is writing on another thread.
+    """
+    db = _read_only_connection()
+    if db is None:
+        return []
+    try:
+        where, args = [], []
+        if uuid:
+            where.append("uuid = ?")
+            args.append(uuid)
+        if failures_only:
+            where.append("ok = 0")
+        clause = (" WHERE " + " AND ".join(where)) if where else ""
+        args.append(limit)
+        return db.execute(
+            "SELECT ts, uuid, action, detail, ok FROM activity"
+            f"{clause} ORDER BY ts DESC LIMIT ?", args,
+        ).fetchall()
+    except sqlite3.Error:
+        return []
     finally:
         db.close()
 

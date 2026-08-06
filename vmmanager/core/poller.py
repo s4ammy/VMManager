@@ -26,30 +26,33 @@ from .models import DomainSnapshot, HostSnapshot, Usage, _fmt_version
 BALLOON_STATS_PERIOD = 5
 
 
-def guest_memory_kb(raw: dict) -> float:
-    """What the guest is actually using, from libvirt's balloon stats.
+def guest_memory_kb(raw: dict) -> tuple[float, bool]:
+    """What the guest is using, and whether that is the guest's own figure.
 
-    In order of truthfulness:
+    Returns (kilobytes, from_the_guest).
 
     - `available` minus `usable` is the guest's own view - everything it has
       minus what it could still hand out - which is what its task manager
-      shows. Only present once the balloon driver is reporting stats.
-    - `current` is the balloon's size: what the guest has been *given*, not
-      what it is using. For a machine that has never been ballooned this is
-      simply its maximum, which is why an unconfigured guest used to sit
-      pinned at 100%.
-    - `rss` is the host's resident footprint for the whole qemu process,
-      guest memory plus emulator overhead, so it can exceed the guest's own
-      maximum. A last resort.
+      shows. Only present once the balloon driver inside the guest is up and
+      reporting, which is a good way into the boot.
+    - `rss` is the host's resident footprint for the qemu process: guest
+      memory plus emulator overhead. Not the guest's own view, and it can
+      exceed the guest's maximum - but it is a real measurement, and during
+      a boot it tracks what the guest has actually touched.
+    - `current` is deliberately not used. It is the balloon's *size*: what
+      the guest has been given, not what it is using, and for a machine
+      that has never been ballooned it is simply its maximum. Reporting it
+      as usage is why a machine read max-of-max from the moment it started
+      until its guest driver came up.
     """
     available = raw.get("balloon.available")
     usable = raw.get("balloon.usable")
     if available is not None and usable is not None and available >= usable:
-        return float(available - usable)
-    current = raw.get("balloon.current")
-    if current is not None:
-        return float(current)
-    return float(raw.get("balloon.rss", 0))
+        return float(available - usable), True
+    rss = raw.get("balloon.rss")
+    if rss:
+        return float(rss), False
+    return 0.0, False
 
 def stat_polling() -> dict:
     """Which statistics the user wants collected (all of them by default)."""
@@ -160,12 +163,12 @@ class PollWorker(QThread):
     def _domain_usage(self, uuid: str, raw: dict, now: float, vcpus: int) -> Usage:
         prev = self._prev.get(uuid)
         self._prev[uuid] = (now, raw)
-        mem_kb = guest_memory_kb(raw)
+        mem_kb, from_guest = guest_memory_kb(raw)
         if prev is None:
-            return Usage(mem_mb=mem_kb / 1024)
+            return Usage(mem_mb=mem_kb / 1024, mem_from_guest=from_guest)
         dt = now - prev[0]
         if dt <= 0:
-            return Usage(mem_mb=mem_kb / 1024)
+            return Usage(mem_mb=mem_kb / 1024, mem_from_guest=from_guest)
         praw = prev[1]
 
         cpu_pct = 0.0
@@ -173,20 +176,50 @@ class PollWorker(QThread):
             cpu_ns = raw["cpu.time"] - praw["cpu.time"]
             cpu_pct = max(0.0, min(100.0, cpu_ns / (dt * 1e9 * max(vcpus, 1)) * 100))
 
-        def rate(prefix: str, keys: tuple[str, ...], count_key: str) -> float:
-            total = 0.0
-            n = raw.get(count_key, 0)
-            for i in range(n):
+        # Per vCPU, from vcpu.N.time. A guest that looks 12% busy overall
+        # may have one core pinned at 100% and eleven idle, which is the
+        # difference between "it has room" and "it is single-threaded".
+        per_cpu = []
+        # current, not maximum: a machine with room to hot-plug more should
+        # not draw a row of bars for cores it does not have yet.
+        count = raw.get("vcpu.current") or raw.get("vcpu.maximum") or 0
+        for i in range(count):
+            a = raw.get(f"vcpu.{i}.time")
+            b = praw.get(f"vcpu.{i}.time")
+            if a is None or b is None or a < b:
+                per_cpu.append(0.0)
+                continue
+            per_cpu.append(max(0.0, min(100.0, (a - b) / (dt * 1e9) * 100)))
+
+        def per_device(
+            prefix: str, keys: tuple[str, ...], count_key: str
+        ) -> tuple[tuple[str, float], ...]:
+            """One rate per device, named as the guest sees it.
+
+            libvirt numbers these by position, which changes when a device
+            is added; the name it reports alongside is what the hardware
+            tab and the guest both call it, so that is what is kept.
+            """
+            out = []
+            for i in range(raw.get(count_key, 0)):
+                total = 0.0
                 for k in keys:
                     a = raw.get(f"{prefix}.{i}.{k}")
                     b = praw.get(f"{prefix}.{i}.{k}")
                     if a is not None and b is not None and a >= b:
                         total += a - b
-            return total / dt
+                name = raw.get(f"{prefix}.{i}.name") or f"{prefix}{i}"
+                out.append((str(name), total / dt))
+            return tuple(out)
 
-        disk_bps = rate("block", ("rd.bytes", "wr.bytes"), "block.count")
-        net_bps = rate("net", ("rx.bytes", "tx.bytes"), "net.count")
-        return Usage(cpu_pct, mem_kb / 1024, disk_bps, net_bps)
+        disks = per_device("block", ("rd.bytes", "wr.bytes"), "block.count")
+        nets = per_device("net", ("rx.bytes", "tx.bytes"), "net.count")
+        return Usage(
+            cpu_pct, mem_kb / 1024,
+            sum(bps for _n, bps in disks), sum(bps for _n, bps in nets),
+            disks, nets, mem_from_guest=from_guest,
+            vcpus=tuple(per_cpu),
+        )
 
     def _host_usage(self, conn: libvirt.virConnect, now: float) -> tuple[float, float]:
         cpu_pct = 0.0

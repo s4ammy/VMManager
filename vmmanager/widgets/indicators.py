@@ -7,6 +7,7 @@ from PySide6.QtCore import (
     QEasingCurve,
     QPointF,
     QPropertyAnimation,
+    QRectF,
     Qt,
 )
 from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen
@@ -148,6 +149,69 @@ class Sparkline(QWidget):
         p.setPen(pen)
         p.drawPath(path)
         p.end()
+
+class CoreBars(QWidget):
+    """One bar per vCPU, drawn in place of the overall line.
+
+    The overall figure is the guest's total divided by its vCPU count, so a
+    machine running one thread flat out reads 8% on twelve cores and looks
+    idle. This is the view that says otherwise: which cores are working and
+    which are not, at a glance, without reading twelve numbers.
+
+    Current values rather than history - the line chart already carries the
+    history, and twelve overlapping traces in a card this size is a mess
+    rather than a chart.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._values: list[float] = []
+        self.setMinimumHeight(48)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+
+    def set_values(self, values) -> None:
+        self._values = [max(0.0, min(100.0, float(v))) for v in values]
+        self.update()
+
+    def paintEvent(self, _event) -> None:  # noqa: N802 - Qt's name
+        if not self._values:
+            return
+        from PySide6.QtGui import QFont, QFontMetrics
+
+        w, h = self.width(), self.height()
+        n = len(self._values)
+        gap = 3 if n <= 16 else 2
+        label_h = 12 if n <= 24 else 0
+        bar_w = max(2.0, (w - gap * (n - 1)) / n)
+        track = QColor(theme.BG_INSET)
+        accent = QColor(theme.ACCENT)
+        hot = QColor(theme.WARN)
+
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        top = 2
+        height = max(4, h - top - label_h)
+        font = QFont(theme.MONO, 7)
+        p.setFont(font)
+        metrics = QFontMetrics(font)
+        for i, value in enumerate(self._values):
+            x = i * (bar_w + gap)
+            p.fillRect(QRectF(x, top, bar_w, height), track)
+            filled = height * (value / 100.0)
+            if filled > 0:
+                # A core sitting at the top is the thing worth spotting.
+                colour = hot if value >= 90 else accent
+                p.fillRect(
+                    QRectF(x, top + height - filled, bar_w, filled), colour
+                )
+            if label_h and bar_w >= metrics.horizontalAdvance("88"):
+                p.setPen(QColor(theme.TEXT_FAINT))
+                p.drawText(
+                    QRectF(x, top + height, bar_w, label_h),
+                    Qt.AlignmentFlag.AlignCenter, str(i),
+                )
+        p.end()
+
 
 class UsageBar(QWidget):
     """Thin capacity bar: accent fill on an inset track."""
